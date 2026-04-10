@@ -6,7 +6,7 @@ import (
 )
 
 func main() {
-	a := app.NewWithID("goKomfy")
+	a := app.NewWithID("gokomfy")
 	a.SetIcon(resourceLogoPng)
 	w := ui.NewMainWindow(a)
 	w.ShowAndRun()

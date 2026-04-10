@@ -1,56 +1,57 @@
-APP_NAME   = komfy
-CLI_NAME   = komfy-cli
-MODULE     = github.com/mamorett/goKomfy
-BUILD_DIR  = build
+APP_NAME    = goKomfy
+APP_ID      = gokomfy
+BINARY_NAME = gokomfy
+CLI_NAME    = gokomfy-cli
+MODULE      = github.com/mamorett/goKomfy
+BUILD_DIR   = build
+ICON_NAME   = logo.png
+ICON_PATH   = cmd/komfy/$(ICON_NAME)
+FYNE        = $(HOME)/go/bin/fyne
 
-.PHONY: all clean linux-amd64 linux-arm64 macos-arm64 macos-app test
+# Detect OS
+OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 
-all: linux-amd64 linux-arm64 macos-arm64 macos-app
+.PHONY: all clean build-host install-linux bundle-icon test
+
+all: build-host
 
 test:
 	go test ./...
 
 # Bundle logo.png as a Go resource
 bundle-icon:
-	~/go/bin/fyne bundle -o cmd/komfy/bundled.go logo.png
+	cd cmd/komfy && $(FYNE) bundle -o bundled.go $(ICON_NAME)
 
-# Create macOS App Bundle
-macos-app:
-	bash bundle_macos.sh
+# Main build target that detects host
+build-host: bundle-icon
+	mkdir -p $(BUILD_DIR)
+ifeq ($(OS),darwin)
+	@echo "Building macOS App Bundle..."
+	cd cmd/komfy && CGO_ENABLED=1 $(FYNE) package -os darwin -name $(APP_NAME) -icon $(ICON_NAME) -id $(APP_ID)
+	mv cmd/komfy/$(APP_NAME).app $(BUILD_DIR)/
+else ifeq ($(OS),linux)
+	@echo "Building Linux binaries..."
+	GOOS=linux CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/komfy
+	GOOS=linux CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(CLI_NAME) ./cmd/komfy-cli
+else
+	@echo "Unsupported OS: $(OS)"
+	exit 1
+endif
 
 # Linux installation for desktop environment integration
 install-linux:
-	install -Dm755 $(BUILD_DIR)/$(APP_NAME)-linux-amd64 $(HOME)/.local/bin/komfy
-	install -Dm644 logo.png $(HOME)/.local/share/icons/hicolor/256x256/apps/gokomfy.png
-	install -Dm644 build/linux/goKomfy.desktop $(HOME)/.local/share/applications/goKomfy.desktop
+ifneq ($(OS),linux)
+	@echo "Install-linux is only supported on Linux"
+	exit 1
+endif
+	install -Dm755 $(BUILD_DIR)/$(BINARY_NAME) $(HOME)/.local/bin/$(BINARY_NAME)
+	install -Dm644 $(ICON_PATH) $(HOME)/.local/share/icons/hicolor/256x256/apps/gokomfy.png
+	install -Dm644 build/linux/gokomfy.desktop $(HOME)/.local/share/applications/gokomfy.desktop
 	update-desktop-database $(HOME)/.local/share/applications/ || true
 	gtk-update-icon-cache -f -t $(HOME)/.local/share/icons/hicolor/ || true
 
-# Linux amd64 (native on a Linux/amd64 host, or cross-compiled)
-linux-amd64:
-	mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
-	  go build -o $(BUILD_DIR)/$(APP_NAME)-linux-amd64 ./cmd/komfy
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
-	  go build -o $(BUILD_DIR)/$(CLI_NAME)-linux-amd64 ./cmd/komfy-cli
-
-# Linux arm64
-linux-arm64:
-	mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
-	  CC=aarch64-linux-gnu-gcc \
-	  go build -o $(BUILD_DIR)/$(APP_NAME)-linux-arm64 ./cmd/komfy
-	GOOS=linux GOARCH=arm64 CGO_ENABLED=1 \
-	  CC=aarch64-linux-gnu-gcc \
-	  go build -o $(BUILD_DIR)/$(CLI_NAME)-linux-arm64 ./cmd/komfy-cli
-
-# macOS arm64 (must be run on macOS arm64 host — CGO cross-compilation from Linux to macOS is complex)
-macos-arm64:
-	mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
-	  go build -o $(BUILD_DIR)/$(APP_NAME)-darwin-arm64 ./cmd/komfy
-	GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
-	  go build -o $(BUILD_DIR)/$(CLI_NAME)-darwin-arm64 ./cmd/komfy-cli
-
 clean:
 	rm -rf $(BUILD_DIR)
+	rm -f cmd/komfy/bundled.go
+	rm -f $(APP_NAME).tar.xz
+	rm -rf cmd/komfy/$(APP_NAME).app
