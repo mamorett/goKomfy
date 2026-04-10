@@ -1,72 +1,71 @@
-# goKomfy — ComfyUI Prompt Extractor (Go Edition)
+<div align="center">
+  <img src="cmd/komfy/logo.png" width="200" height="200" alt="goKomfy Logo">
+  <h1>goKomfy</h1>
+  <p><strong>A high-performance, cross-platform ComfyUI Prompt Extractor</strong></p>
+  <p>
+    <img src="https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white" alt="Go">
+    <img src="https://img.shields.io/badge/Fyne-2D3E50?style=for-the-badge&logo=fyne&logoColor=white" alt="Fyne">
+    <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License">
+  </p>
+</div>
 
-A high-performance, cross-platform tool to extract positive prompts from ComfyUI-generated PNG files and JSON workflows. Ported from the original Python/PyQt6 application to Go for better performance and a single-binary distribution.
+---
 
-## Features
+**goKomfy** is a fast and lightweight tool designed to extract positive prompts from **ComfyUI-generated PNG files** and **JSON workflows**. 
 
-- **Dual Extraction Modes**:
-  - **ComfyUI**: Extracts prompts from internal `workflow` and `prompt` metadata chunks.
-  - **Parameters**: Extracts prompts from standard `parameters` metadata (A1111/Forge style).
-- **Batch Processing**: Select multiple files or entire folders at once.
-- **Drag & Drop**: Intuitive GUI interface using the Fyne toolkit.
-- **Image Thumbnails**: Visual preview for single PNG files.
-- **CLI Tool**: Headless version for automated workflows and terminal use.
-- **Native Binaries**: Runs on Linux (AMD64/ARM64) and macOS (Apple Silicon).
+Ported from the original Python/PyQt6 application to Go, it offers superior performance, a refined user interface, and single-binary distribution.
 
-## Installation
+## ✨ Key Features
+
+- 📂 **Dual Extraction Modes**:
+  - **ComfyUI**: Native extraction from `workflow` and `prompt` metadata chunks.
+  - **Parameters**: Support for standard `parameters` metadata (A1111/Forge style).
+- 🖱️ **Enhanced Drag & Drop**:
+  - Intuitive, high-visibility drop zone with interactive visual feedback (flashing confirm).
+  - Supports dropping single files, multiple files, or entire folders.
+- 📋 **Auto-Copy to Clipboard**:
+  - Optional switch to automatically copy all extracted prompts as soon as they are processed.
+- 🖼️ **Smart Image Preview**:
+  - Visual thumbnail for PNG files.
+  - **Automatic Aspect Ratio** calculation (16:9, 4:3, 1:1, etc.) displayed alongside image dimensions.
+- ⌨️ **Keyboard Optimized**: Shortcuts for all major actions (Mode toggle, Open, Save, Clear).
+- 🐚 **Headless CLI**: A dedicated command-line tool for automated workflows and terminal enthusiasts.
+
+## 🚀 Installation
 
 ### Pre-built Binaries
-Download the latest binary for your platform from the Releases page.
+Grab the latest release for your platform from the [Releases](https://github.com/mamorett/goKomfy/releases) page.
 
 ### Building from Source
 **Prerequisites**:
 - Go 1.21 or higher
-- A C compiler (GCC or Clang) for GUI builds (CGo)
-- OpenGL development headers:
-  - **Linux (X11)**: `sudo apt install libgl1-mesa-dev xorg-dev`
-  - **macOS**: Xcode Command Line Tools (`xcode-select --install`)
+- A C compiler (GCC or Clang)
+- OpenGL development headers (e.g., `libgl1-mesa-dev xorg-dev` on Linux)
 
-**Build commands**:
 ```bash
-# Build both GUI and CLI for host platform
+# Clone and build for host platform
+git clone https://github.com/mamorett/goKomfy.git
+cd goKomfy
 make
-
-# Build for specific platforms
-make linux-amd64
-make linux-arm64
-make macos-arm64
 ```
 
-## Usage
+## 📖 Usage
 
 ### GUI Application (`komfy`)
-Run the binary:
-```bash
-./build/komfy-darwin-arm64  # macOS
-./build/komfy-linux-amd64   # Linux
-```
-- Drag and drop files/folders into the window.
-- Use **Ctrl+E** to toggle between ComfyUI and Parameters extraction modes.
-- Copy all or specific prompts to the clipboard.
-- Save extracted prompts to a `.txt` file.
+The main interface for most users. 
+- **Toggle Mode**: `Ctrl+E` or use the dropdown.
+- **Open Files**: `Ctrl+O` or Drag & Drop.
+- **Aspect Ratio**: Automatically shown below the preview image.
+- **Auto-Copy**: Enable the checkbox to skip manual copying.
 
 ### CLI Tool (`komfy-cli`)
+Perfect for scripts or quick terminal checks.
 ```bash
-./build/komfy-cli <file1> <file2> <pattern/*.png>
+./build/komfy-cli path/to/image.png
 ```
-The CLI tool will print extracted prompts for each valid file to standard output.
 
-## Runtime Requirements (Linux Only)
-The clipboard functionality requires one of the following to be installed:
-- `xclip`
-- `xsel`
-- A Wayland clipboard daemon (if using Wayland)
+## 🛠️ Requirements (Linux)
+The clipboard functionality requires one of: `xclip`, `xsel`, or a Wayland clipboard daemon.
 
-## Support
-Supported file formats:
-- **ComfyUI PNG**: PNGs with `workflow` or `prompt` metadata chunks.
-- **Parameters PNG**: PNGs with `parameters` metadata (Automatic1111 style).
-- **JSON Workflow**: ComfyUI workflow files (exported from the UI).
-
-## License
-MIT License. See `LICENSE` for details.
+## 📄 License
+MIT License. See [LICENSE](LICENSE) for details.
