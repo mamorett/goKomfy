@@ -79,6 +79,10 @@ func (mw *MainWindow) setupUI() {
 	// 1. Header (Mode + Browse)
 	mw.modeSelect = widget.NewSelect([]string{"ComfyUI", "Parameters"}, func(s string) {
 		mw.state.mode = s
+		// Re-extract if we already have files loaded
+		if len(mw.state.currentFiles) > 0 && !mw.state.busy {
+			mw.processFiles(mw.state.currentFiles)
+		}
 	})
 	mw.modeSelect.SetSelected(mw.state.mode)
 	
@@ -335,24 +339,25 @@ func (mw *MainWindow) setUIBusy(busy bool) {
 func (mw *MainWindow) processFiles(files []string) {
 	mw.setUIBusy(true)
 	mw.state.currentFiles = files
-	
-	// Reset preview
+
+	// Immediately hide old preview on main thread (safe, we're on main goroutine here)
 	mw.previewCont.Hide()
-	
-	// If single PNG, load preview
-	if len(files) == 1 && strings.ToLower(filepath.Ext(files[0])) == ".png" {
-		img, w, h, err := loadThumbnail(files[0], 400) // Increased preview size
-		if err == nil {
-			mw.previewImg.Image = img
-			mw.previewLabel.SetText(fmt.Sprintf("%d×%d | %s", w, h, filepath.Base(files[0])))
-			mw.previewCont.Show()
-		}
-	}
 
 	go func() {
+		// Load thumbnail off-thread
+		var thumbImg image.Image
+		var thumbW, thumbH int
+		if len(files) == 1 && strings.ToLower(filepath.Ext(files[0])) == ".png" {
+			img, w, h, err := loadThumbnail(files[0], 400)
+			if err == nil {
+				thumbImg = img
+				thumbW, thumbH = w, h
+			}
+		}
+
+		// Run extraction
 		results := make([]*extractor.ExtractionResult, 0, len(files))
 		e := &extractor.PromptExtractor{}
-
 		for _, f := range files {
 			var r *extractor.ExtractionResult
 			var err error
@@ -377,7 +382,16 @@ func (mw *MainWindow) processFiles(files []string) {
 			results = append(results, r)
 		}
 
-		mw.onExtractionFinished(results)
+		// Post all UI updates back on the main thread
+		fyne.Do(func() {
+			if thumbImg != nil {
+				mw.previewImg.Image = thumbImg
+				mw.previewImg.Refresh()
+				mw.previewLabel.SetText(fmt.Sprintf("%d×%d | %s", thumbW, thumbH, filepath.Base(files[0])))
+				mw.previewCont.Show()
+			}
+			mw.onExtractionFinished(results)
+		})
 	}()
 }
 
@@ -419,7 +433,7 @@ func (mw *MainWindow) onExtractionFinished(results []*extractor.ExtractionResult
 		if i < len(results)-1 {
 			promptLines = append(promptLines, "\n"+strings.Repeat("=", 60)+"\n")
 		}
-		
+
 		summaryLines = append(summaryLines, fmt.Sprintf("File: %s", result.FileInfo.Filename))
 		summaryLines = append(summaryLines, fmt.Sprintf("  Method: %s", result.ExtractionMethod))
 		summaryLines = append(summaryLines, fmt.Sprintf("  Prompts found: %d", len(prompts)))
@@ -441,7 +455,6 @@ func (mw *MainWindow) onExtractionFinished(results []*extractor.ExtractionResult
 	mw.state.allPromptTexts = allTexts
 
 	// Update UI on main thread
-	mw.window.Canvas().Refresh(mw.promptEntry)
 	mw.promptEntry.SetText(strings.Join(promptLines, "\n"))
 	mw.summaryEntry.SetText(strings.Join(summaryLines, "\n"))
 	mw.statusLabel.SetText(fmt.Sprintf("Found %d prompts in %d files", totalPrompts, filesWithPrompts))

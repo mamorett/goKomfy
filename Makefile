@@ -10,9 +10,21 @@ all: linux-amd64 linux-arm64 macos-arm64 macos-app
 test:
 	go test ./...
 
+# Bundle logo.png as a Go resource
+bundle-icon:
+	~/go/bin/fyne bundle -o cmd/komfy/bundled.go logo.png
+
 # Create macOS App Bundle
 macos-app:
 	bash bundle_macos.sh
+
+# Linux installation for desktop environment integration
+install-linux:
+	install -Dm755 $(BUILD_DIR)/$(APP_NAME)-linux-amd64 $(HOME)/.local/bin/komfy
+	install -Dm644 logo.png $(HOME)/.local/share/icons/hicolor/256x256/apps/gokomfy.png
+	install -Dm644 build/linux/goKomfy.desktop $(HOME)/.local/share/applications/goKomfy.desktop
+	update-desktop-database $(HOME)/.local/share/applications/ || true
+	gtk-update-icon-cache -f -t $(HOME)/.local/share/icons/hicolor/ || true
 
 # Linux amd64 (native on a Linux/amd64 host, or cross-compiled)
 linux-amd64:
