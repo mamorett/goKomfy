@@ -287,6 +287,7 @@ func (mw *MainWindow) browseFolder() {
 
 func (mw *MainWindow) loadFiles(paths []string) {
 	if mw.state.busy {
+		dialog.ShowInformation("Busy", "Extraction already in progress. Please wait.", mw.window)
 		return
 	}
 
@@ -294,6 +295,7 @@ func (mw *MainWindow) loadFiles(paths []string) {
 	for _, p := range paths {
 		info, err := os.Stat(p)
 		if err != nil {
+			mw.statusLabel.SetText(fmt.Sprintf("Error reading file: %v", err))
 			continue
 		}
 		if info.IsDir() {
@@ -337,10 +339,15 @@ func (mw *MainWindow) setUIBusy(busy bool) {
 }
 
 func (mw *MainWindow) processFiles(files []string) {
+	if mw.state.busy && len(mw.state.currentFiles) > 0 {
+		return
+	}
 	mw.setUIBusy(true)
 	mw.state.currentFiles = files
 
-	// Immediately hide old preview on main thread (safe, we're on main goroutine here)
+	// Immediately clear old state and hide preview
+	mw.promptEntry.SetText("")
+	mw.summaryEntry.SetText("")
 	mw.previewCont.Hide()
 
 	go func() {

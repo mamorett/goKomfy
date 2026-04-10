@@ -1,57 +1,119 @@
-APP_NAME    = goKomfy
-APP_ID      = gokomfy
-BINARY_NAME = gokomfy
-CLI_NAME    = gokomfy-cli
-MODULE      = github.com/mamorett/goKomfy
-BUILD_DIR   = build
-ICON_NAME   = logo.png
-ICON_PATH   = cmd/komfy/$(ICON_NAME)
-FYNE        = $(HOME)/go/bin/fyne
+# ─────────────────────────────────────────────────────────────────────────────
+# goKomfy — Build Configuration
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Detect OS
+APP_NAME    := goKomfy
+APP_ID      := gokomfy
+BINARY_NAME := gokomfy
+CLI_NAME    := gokomfy-cli
+MODULE      := github.com/mamorett/goKomfy
+
+# Paths
+BUILD_DIR   := build
+CMD_KOMFY   := cmd/komfy
+CMD_CLI     := cmd/komfy-cli
+ICON_NAME   := logo.png
+ICON_SRC    := $(CMD_KOMFY)/$(ICON_NAME)
+
+# Tools
+FYNE        := $(HOME)/go/bin/fyne
+
+# Install paths (Linux)
+INSTALL_BIN  := $(HOME)/.local/bin
+INSTALL_APPS := $(HOME)/.local/share/applications
+INSTALL_ICON := $(HOME)/.local/share/icons/hicolor
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Detect host OS
+# ─────────────────────────────────────────────────────────────────────────────
+
 OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 
-.PHONY: all clean build-host install-linux bundle-icon test
+# ─────────────────────────────────────────────────────────────────────────────
+# Phony targets
+# ─────────────────────────────────────────────────────────────────────────────
 
-all: build-host
+.PHONY: all build bundle-icon install-linux clean test
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default target
+# ─────────────────────────────────────────────────────────────────────────────
+
+all: build
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tests
+# ─────────────────────────────────────────────────────────────────────────────
 
 test:
 	go test ./...
 
-# Bundle logo.png as a Go resource
-bundle-icon:
-	cd cmd/komfy && $(FYNE) bundle -o bundled.go $(ICON_NAME)
+# ─────────────────────────────────────────────────────────────────────────────
+# Bundle icon as an embedded Go resource
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Main build target that detects host
-build-host: bundle-icon
+bundle-icon: $(ICON_SRC)
+	cd $(CMD_KOMFY) && $(FYNE) bundle -o bundled.go $(ICON_NAME)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Build (auto-detects host OS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+build: bundle-icon
 	mkdir -p $(BUILD_DIR)
 ifeq ($(OS),darwin)
-	@echo "Building macOS App Bundle..."
-	cd cmd/komfy && CGO_ENABLED=1 $(FYNE) package -os darwin -name $(APP_NAME) -icon $(ICON_NAME) -id $(APP_ID)
-	mv cmd/komfy/$(APP_NAME).app $(BUILD_DIR)/
+	@echo "→ Building macOS app bundle…"
+	cd $(CMD_KOMFY) && CGO_ENABLED=1 $(FYNE) package \
+		-os darwin -name $(APP_NAME) -icon $(ICON_NAME) -id $(APP_ID)
+	mv $(CMD_KOMFY)/$(APP_NAME).app $(BUILD_DIR)/
 else ifeq ($(OS),linux)
-	@echo "Building Linux binaries..."
-	GOOS=linux CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/komfy
-	GOOS=linux CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(CLI_NAME) ./cmd/komfy-cli
+	@echo "→ Building Linux binaries…"
+	GOOS=linux CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_KOMFY)
+	GOOS=linux CGO_ENABLED=1 go build -o $(BUILD_DIR)/$(CLI_NAME)    ./$(CMD_CLI)
 else
-	@echo "Unsupported OS: $(OS)"
-	exit 1
+	$(error Unsupported OS: $(OS))
 endif
 
-# Linux installation for desktop environment integration
+# ─────────────────────────────────────────────────────────────────────────────
+# Install (Linux only)
+# ─────────────────────────────────────────────────────────────────────────────
+
 install-linux:
 ifneq ($(OS),linux)
-	@echo "Install-linux is only supported on Linux"
-	exit 1
+	$(error install-linux is only supported on Linux)
 endif
-	install -Dm755 $(BUILD_DIR)/$(BINARY_NAME) $(HOME)/.local/bin/$(BINARY_NAME)
-	install -Dm644 $(ICON_PATH) $(HOME)/.local/share/icons/hicolor/256x256/apps/gokomfy.png
-	install -Dm644 build/linux/gokomfy.desktop $(HOME)/.local/share/applications/gokomfy.desktop
-	update-desktop-database $(HOME)/.local/share/applications/ || true
-	gtk-update-icon-cache -f -t $(HOME)/.local/share/icons/hicolor/ || true
+	@echo "→ Removing stale desktop entries…"
+	rm -f $(INSTALL_APPS)/$(APP_ID).desktop
+	rm -f $(INSTALL_APPS)/io.github.mamorett.$(APP_ID).desktop
+
+	@echo "→ Installing binaries…"
+	install -Dm755 $(BUILD_DIR)/$(BINARY_NAME) $(INSTALL_BIN)/$(BINARY_NAME)
+	install -Dm755 $(BUILD_DIR)/$(CLI_NAME)    $(INSTALL_BIN)/$(CLI_NAME)
+
+	@echo "→ Installing icons…"
+	install -Dm644 $(ICON_SRC) $(INSTALL_ICON)/256x256/apps/$(APP_ID).png
+	install -Dm644 $(ICON_SRC) $(INSTALL_ICON)/128x128/apps/$(APP_ID).png
+	install -Dm644 $(ICON_SRC) $(INSTALL_ICON)/48x48/apps/$(APP_ID).png
+
+	@echo "→ Installing desktop entry…"
+	mkdir -p $(INSTALL_APPS)
+	cp assets/linux/$(APP_ID).desktop $(INSTALL_APPS)/$(APP_ID).desktop
+	sed -i "s|^Exec=.*|Exec=$(INSTALL_BIN)/$(BINARY_NAME)|" \
+		$(INSTALL_APPS)/$(APP_ID).desktop
+
+	@echo "→ Refreshing desktop and icon caches…"
+	update-desktop-database $(INSTALL_APPS)/ 2>/dev/null || true
+	gtk-update-icon-cache -f -t $(INSTALL_ICON)/ 2>/dev/null || true
+	kbuildsycoca6 2>/dev/null || kbuildsycoca5 2>/dev/null || true
+
+	@echo "✓ Installation complete."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Clean
+# ─────────────────────────────────────────────────────────────────────────────
 
 clean:
 	rm -rf $(BUILD_DIR)
-	rm -f cmd/komfy/bundled.go
-	rm -f $(APP_NAME).tar.xz
-	rm -rf cmd/komfy/$(APP_NAME).app
+	rm -f  $(CMD_KOMFY)/bundled.go
+	rm -rf $(CMD_KOMFY)/$(APP_NAME).app
+	rm -f  $(APP_NAME).tar.xz

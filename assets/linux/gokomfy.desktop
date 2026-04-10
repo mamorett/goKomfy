@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=goKomfy
+GenericName=ComfyUI Prompt Extractor
+Comment=Extract positive prompts and metadata from ComfyUI PNG images and JSON workflows
+Exec=gokomfy
+Icon=gokomfy
+Terminal=false
+StartupNotify=true
+StartupWMClass=gokomfy
+Categories=Graphics;Utility;RasterGraphics;
+Keywords=comfyui;prompt;image;ai;stable diffusion;metadata;
+MimeType=image/png;application/json;
+X-KDE-StartupNotify=true
