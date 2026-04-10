@@ -33,6 +33,7 @@ type AppState struct {
 	allPromptTexts  []string
 	mode            string // "ComfyUI" or "Parameters"
 	busy            bool
+	autoCopy        bool
 }
 
 type MainWindow struct {
@@ -41,10 +42,11 @@ type MainWindow struct {
 
 	state AppState
 
-	modeSelect   *widget.Select
-	promptEntry  *ReadOnlyEntry
-	summaryEntry *ReadOnlyEntry
-	progressBar  *widget.ProgressBarInfinite
+	modeSelect    *widget.Select
+	autoCopyCheck *widget.Check
+	promptEntry   *ReadOnlyEntry
+	summaryEntry  *ReadOnlyEntry
+	progressBar   *widget.ProgressBarInfinite
 	
 	dropZone     *DropZone
 	previewImg   *canvas.Image
@@ -85,6 +87,10 @@ func (mw *MainWindow) setupUI() {
 		}
 	})
 	mw.modeSelect.SetSelected(mw.state.mode)
+
+	mw.autoCopyCheck = widget.NewCheck("Auto-copy to Clipboard", func(b bool) {
+		mw.state.autoCopy = b
+	})
 	
 	browseFilesBtn := widget.NewButtonWithIcon("Open Files", theme.FileIcon(), func() {
 		mw.browseFiles()
@@ -98,6 +104,7 @@ func (mw *MainWindow) setupUI() {
 		layout.NewSpacer(),
 		widget.NewLabel("Extraction Mode:"),
 		mw.modeSelect,
+		mw.autoCopyCheck,
 		widget.NewSeparator(),
 		browseFilesBtn,
 		browseFolderBtn,
@@ -186,6 +193,7 @@ func (mw *MainWindow) setupUI() {
 			}
 		}
 		if len(paths) > 0 {
+			mw.dropZone.Flash()
 			mw.loadFiles(paths)
 		}
 	})
@@ -465,6 +473,12 @@ func (mw *MainWindow) onExtractionFinished(results []*extractor.ExtractionResult
 	mw.promptEntry.SetText(strings.Join(promptLines, "\n"))
 	mw.summaryEntry.SetText(strings.Join(summaryLines, "\n"))
 	mw.statusLabel.SetText(fmt.Sprintf("Found %d prompts in %d files", totalPrompts, filesWithPrompts))
+	
+	if mw.state.autoCopy && len(allTexts) > 0 {
+		mw.copyAllPrompts()
+		mw.statusLabel.SetText(mw.statusLabel.Text + " [COPIED TO CLIPBOARD]")
+	}
+	
 	mw.setUIBusy(false)
 }
 

@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"time"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/driver/desktop"
@@ -14,6 +16,7 @@ type DropZone struct {
 	label     *widget.Label
 	onDropped func(paths []string)
 	hovered   bool
+	blinking  bool
 }
 
 func NewDropZone(text string, onDropped func(paths []string)) *DropZone {
@@ -28,7 +31,7 @@ func NewDropZone(text string, onDropped func(paths []string)) *DropZone {
 }
 
 func (d *DropZone) CreateRenderer() fyne.WidgetRenderer {
-	bg := canvas.NewRectangle(color.Transparent)
+	bg := canvas.NewRectangle(theme.InputBackgroundColor())
 	
 	// Use a slightly visible border
 	border := canvas.NewRectangle(color.Transparent)
@@ -64,12 +67,18 @@ func (r *dropZoneRenderer) MinSize() fyne.Size {
 }
 
 func (r *dropZoneRenderer) Refresh() {
-	if r.dropZone.hovered {
+	if r.dropZone.blinking {
+		r.bg.FillColor = theme.PrimaryColor()
+		r.border.StrokeColor = theme.PrimaryColor()
+		r.dropZone.label.TextStyle.Bold = true
+	} else if r.dropZone.hovered {
 		r.border.StrokeColor = theme.PrimaryColor()
 		r.bg.FillColor = theme.HoverColor()
+		r.dropZone.label.TextStyle.Bold = false
 	} else {
 		r.border.StrokeColor = theme.DisabledColor()
-		r.bg.FillColor = color.Transparent
+		r.bg.FillColor = theme.InputBackgroundColor()
+		r.dropZone.label.TextStyle.Bold = false
 	}
 	r.bg.Refresh()
 	r.border.Refresh()
@@ -92,6 +101,16 @@ func (d *DropZone) MouseOut() {
 	d.Refresh()
 }
 
+func (d *DropZone) Flash() {
+	d.blinking = true
+	d.Refresh()
+	go func() {
+		time.Sleep(150 * time.Millisecond)
+		d.blinking = false
+		d.Refresh()
+	}()
+}
+
 func (d *DropZone) DroppedURIs(uris []fyne.URI) {
 	var paths []string
 	for _, u := range uris {
@@ -99,7 +118,10 @@ func (d *DropZone) DroppedURIs(uris []fyne.URI) {
 			paths = append(paths, u.Path())
 		}
 	}
-	if d.onDropped != nil && len(paths) > 0 {
-		d.onDropped(paths)
+	if len(paths) > 0 {
+		d.Flash()
+		if d.onDropped != nil {
+			d.onDropped(paths)
+		}
 	}
 }
