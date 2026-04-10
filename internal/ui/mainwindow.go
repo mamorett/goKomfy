@@ -41,15 +41,15 @@ type MainWindow struct {
 
 	state AppState
 
-	modeSelect  *widget.Select
-	promptEntry *widget.Entry
-	summaryEntry *widget.Entry
-	progressBar *widget.ProgressBarInfinite
+	modeSelect   *widget.Select
+	promptEntry  *ReadOnlyEntry
+	summaryEntry *ReadOnlyEntry
+	progressBar  *widget.ProgressBarInfinite
 	
-	dropZone    *DropZone
-	previewImg  *canvas.Image
+	dropZone     *DropZone
+	previewImg   *canvas.Image
 	previewLabel *widget.Label
-	previewCont *fyne.Container
+	previewCont  *fyne.Container
 
 	copyAllBtn   *widget.Button
 	copyFirstBtn *widget.Button
@@ -76,108 +76,84 @@ func NewMainWindow(a fyne.App) *MainWindow {
 }
 
 func (mw *MainWindow) setupUI() {
-	// Settings
+	// 1. Header (Mode + Browse)
 	mw.modeSelect = widget.NewSelect([]string{"ComfyUI", "Parameters"}, func(s string) {
 		mw.state.mode = s
 	})
 	mw.modeSelect.SetSelected(mw.state.mode)
 	
-	settings := container.NewHBox(
-		layout.NewSpacer(),
-		widget.NewLabelWithStyle("Extraction Mode:", fyne.TextAlignTrailing, fyne.TextStyle{Bold: true}),
-		mw.modeSelect,
-		widget.NewIcon(theme.InfoIcon()),
-		widget.NewLabel("(Ctrl+E)"),
-		layout.NewSpacer(),
-	)
-
-	// File Zone
-	mw.dropZone = NewDropZone("Drop PNG or JSON files here to extract prompts", func(paths []string) {
-		mw.loadFiles(paths)
-	})
-
-	// Add Window-level drop
-	mw.window.SetOnDropped(func(pos fyne.Position, uris []fyne.URI) {
-		var paths []string
-		for _, u := range uris {
-			if u.Scheme() == "file" {
-				paths = append(paths, u.Path())
-			}
-		}
-		if len(paths) > 0 {
-			mw.loadFiles(paths)
-		}
-	})
-
-	browseFilesBtn := widget.NewButtonWithIcon("Files...", theme.FileIcon(), func() {
+	browseFilesBtn := widget.NewButtonWithIcon("Open Files", theme.FileIcon(), func() {
 		mw.browseFiles()
 	})
-	browseFolderBtn := widget.NewButtonWithIcon("Folder...", theme.FolderOpenIcon(), func() {
+	browseFolderBtn := widget.NewButtonWithIcon("Open Folder", theme.FolderOpenIcon(), func() {
 		mw.browseFolder()
+	})
+
+	header := container.NewHBox(
+		widget.NewLabelWithStyle("goKomfy", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Italic: true}),
+		layout.NewSpacer(),
+		widget.NewLabel("Extraction Mode:"),
+		mw.modeSelect,
+		widget.NewSeparator(),
+		browseFilesBtn,
+		browseFolderBtn,
+	)
+
+	// 2. Center Content (Split Top/Bottom)
+	
+	// Top part of the split: Dropzone and Preview
+	mw.dropZone = NewDropZone("DRAG & DROP PNG/JSON HERE", func(paths []string) {
+		mw.loadFiles(paths)
 	})
 
 	mw.previewImg = canvas.NewImageFromImage(nil)
 	mw.previewImg.FillMode = canvas.ImageFillContain
-	mw.previewImg.SetMinSize(fyne.NewSize(240, 240))
+	
+	// previewBox ensures the right side of the split has a stable size and doesn't jump
+	previewBoxCont := container.NewGridWrap(fyne.NewSize(300, 300), mw.previewImg)
+
 	mw.previewLabel = widget.NewLabel("")
 	mw.previewLabel.Alignment = fyne.TextAlignCenter
 	mw.previewLabel.TextStyle = fyne.TextStyle{Monospace: true}
 
-	mw.previewCont = container.NewVBox(
-		container.NewPadded(mw.previewImg),
-		mw.previewLabel,
-	)
+	mw.previewCont = container.NewBorder(nil, mw.previewLabel, nil, nil, previewBoxCont)
 	mw.previewCont.Hide()
 
-	rightCol := container.NewVBox(
-		widget.NewLabelWithStyle("Quick Browse", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		browseFilesBtn,
-		browseFolderBtn,
-		layout.NewSpacer(),
+	// Use an HSplit for DropZone | Preview
+	topSplit := container.NewHSplit(
+		mw.dropZone,
 		mw.previewCont,
-		layout.NewSpacer(),
 	)
+	topSplit.Offset = 0.6 // Initial balance
 
-	fileZone := container.NewHSplit(
-		container.NewPadded(mw.dropZone),
-		container.NewPadded(rightCol),
-	)
-	fileZone.Offset = 0.7
-
-	// Tabs
-	mw.promptEntry = widget.NewMultiLineEntry()
-	mw.promptEntry.Disable()
+	// Bottom part of the split: Results
+	mw.promptEntry = NewReadOnlyEntry()
 	mw.promptEntry.Wrapping = fyne.TextWrapWord
 	mw.promptEntry.TextStyle = fyne.TextStyle{Monospace: true}
 
-	mw.summaryEntry = widget.NewMultiLineEntry()
-	mw.summaryEntry.Disable()
+	mw.summaryEntry = NewReadOnlyEntry()
 	mw.summaryEntry.Wrapping = fyne.TextWrapWord
 
 	tabs := container.NewAppTabs(
-		container.NewTabItemWithIcon("Prompts", theme.FileTextIcon(), container.NewPadded(container.NewScroll(mw.promptEntry))),
-		container.NewTabItemWithIcon("Summary", theme.InfoIcon(), container.NewPadded(container.NewScroll(mw.summaryEntry))),
+		container.NewTabItemWithIcon("Extracted Prompts", theme.FileTextIcon(), container.NewScroll(mw.promptEntry)),
+		container.NewTabItemWithIcon("Summary", theme.InfoIcon(), container.NewScroll(mw.summaryEntry)),
 	)
 
-	// Progress
+	// MAIN VSplit (Top Area vs Results)
+	mainSplit := container.NewVSplit(
+		topSplit,
+		tabs,
+	)
+	mainSplit.Offset = 0.4 // 40% top, 60% bottom
+
+	// 3. Footer (Progress + Actions + Status)
 	mw.progressBar = widget.NewProgressBarInfinite()
 	mw.progressBar.Hide()
 
-	// Action Buttons
-	mw.copyAllBtn = widget.NewButtonWithIcon("Copy All", theme.ContentCopyIcon(), func() {
-		mw.copyAllPrompts()
-	})
-	mw.copyFirstBtn = widget.NewButtonWithIcon("Copy First", theme.ContentCopyIcon(), func() {
-		mw.copyFirstPrompt()
-	})
-	mw.saveBtn = widget.NewButtonWithIcon("Save", theme.DocumentSaveIcon(), func() {
-		mw.saveToFile()
-	})
-	mw.clearBtn = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), func() {
-		mw.clearResults()
-	})
-
-	mw.updateButtonStates()
+	mw.copyAllBtn = widget.NewButtonWithIcon("Copy All", theme.ContentCopyIcon(), mw.copyAllPrompts)
+	mw.copyFirstBtn = widget.NewButtonWithIcon("Copy First", theme.ContentCopyIcon(), mw.copyFirstPrompt)
+	mw.saveBtn = widget.NewButtonWithIcon("Save To File", theme.DocumentSaveIcon(), mw.saveToFile)
+	mw.clearBtn = widget.NewButtonWithIcon("Clear Results", theme.DeleteIcon(), mw.clearResults)
 
 	actions := container.NewHBox(
 		layout.NewSpacer(),
@@ -191,27 +167,35 @@ func (mw *MainWindow) setupUI() {
 	mw.statusLabel = widget.NewLabel("Ready")
 	mw.statusLabel.TextStyle = fyne.TextStyle{Italic: true}
 
-	bottomCont := container.NewVBox(
+	footer := container.NewVBox(
 		mw.progressBar,
 		container.NewPadded(actions),
 		container.NewHBox(layout.NewSpacer(), mw.statusLabel),
 	)
 
-	content := container.NewBorder(
-		container.NewPadded(settings),
-		bottomCont,
-		nil,
-		nil,
-		fileZone,
-	)
-	
-	mainContent := container.NewVSplit(
-		content,
-		tabs,
-	)
-	mainContent.Offset = 0.5
+	// Set window level drop as well
+	mw.window.SetOnDropped(func(p fyne.Position, uris []fyne.URI) {
+		var paths []string
+		for _, u := range uris {
+			if u.Scheme() == "file" {
+				paths = append(paths, u.Path())
+			}
+		}
+		if len(paths) > 0 {
+			mw.loadFiles(paths)
+		}
+	})
 
-	mw.window.SetContent(container.NewPadded(mainContent))
+	// Final Layout
+	mw.window.SetContent(container.NewBorder(
+		container.NewPadded(header),
+		footer,
+		nil,
+		nil,
+		mainSplit,
+	))
+	
+	mw.updateButtonStates()
 }
 
 func (mw *MainWindow) setupShortcuts() {
@@ -357,10 +341,10 @@ func (mw *MainWindow) processFiles(files []string) {
 	
 	// If single PNG, load preview
 	if len(files) == 1 && strings.ToLower(filepath.Ext(files[0])) == ".png" {
-		img, w, h, err := loadThumbnail(files[0], 240)
+		img, w, h, err := loadThumbnail(files[0], 400) // Increased preview size
 		if err == nil {
 			mw.previewImg.Image = img
-			mw.previewLabel.SetText(fmt.Sprintf("%d×%d\n%s", w, h, filepath.Base(files[0])))
+			mw.previewLabel.SetText(fmt.Sprintf("%d×%d | %s", w, h, filepath.Base(files[0])))
 			mw.previewCont.Show()
 		}
 	}
@@ -595,3 +579,4 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	draw.BiLinear.Scale(dst, dst.Bounds(), img, img.Bounds(), draw.Over, nil)
 	return dst, origW, origH, nil
 }
+
