@@ -2,16 +2,19 @@ package ui
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"image"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
 	"io/fs"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -28,6 +31,7 @@ import (
 )
 
 type AppState struct {
+	mu              sync.Mutex
 	currentFiles    []string
 	currentResults  []*extractor.ExtractionResult
 	allPromptTexts  []string
@@ -113,9 +117,7 @@ func (mw *MainWindow) setupUI() {
 	// 2. Center Content (Split Top/Bottom)
 	
 	// Top part of the split: Dropzone and Preview
-	mw.dropZone = NewDropZone("DRAG & DROP PNG/JSON HERE", func(paths []string) {
-		mw.loadFiles(paths)
-	})
+	mw.dropZone = NewDropZone("DRAG & DROP PNG/JSON HERE")
 
 	mw.previewImg = canvas.NewImageFromImage(nil)
 	mw.previewImg.FillMode = canvas.ImageFillContain
@@ -278,6 +280,7 @@ func (mw *MainWindow) browseFiles() {
 		if err != nil || r == nil {
 			return
 		}
+		defer r.Close()
 		mw.loadFiles([]string{r.URI().Path()})
 	}, mw.window)
 	d.Show()
@@ -293,17 +296,26 @@ func (mw *MainWindow) browseFolder() {
 	d.Show()
 }
 
+func (mw *MainWindow) isBusy() bool {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	return mw.state.busy
+}
+
 func (mw *MainWindow) loadFiles(paths []string) {
-	if mw.state.busy {
-		dialog.ShowInformation("Busy", "Extraction already in progress. Please wait.", mw.window)
+	// If busy, we simply ignore new drops instead of showing a blocking dialog.
+	// This prevents the "double-drop" or rapid drop from freezing the app with dialogs.
+	if mw.isBusy() {
+		mw.statusLabel.SetText("Processing in progress — please wait...")
+		log.Printf("[DEBUG] Drop rejected because app is busy")
 		return
 	}
+	log.Printf("[DEBUG] Processing %d files", len(paths))
 
 	var valid []string
 	for _, p := range paths {
 		info, err := os.Stat(p)
 		if err != nil {
-			mw.statusLabel.SetText(fmt.Sprintf("Error reading file: %v", err))
 			continue
 		}
 		if info.IsDir() {
@@ -328,7 +340,6 @@ func (mw *MainWindow) loadFiles(paths []string) {
 	}
 
 	if len(valid) == 0 {
-		dialog.ShowInformation("Warning", "No valid PNG or JSON files found", mw.window)
 		return
 	}
 
@@ -336,7 +347,10 @@ func (mw *MainWindow) loadFiles(paths []string) {
 }
 
 func (mw *MainWindow) setUIBusy(busy bool) {
+	mw.state.mu.Lock()
 	mw.state.busy = busy
+	mw.state.mu.Unlock()
+
 	if busy {
 		mw.progressBar.Show()
 		mw.statusLabel.SetText("Processing...")
@@ -347,18 +361,66 @@ func (mw *MainWindow) setUIBusy(busy bool) {
 }
 
 func (mw *MainWindow) processFiles(files []string) {
-	if mw.state.busy && len(mw.state.currentFiles) > 0 {
+	if mw.isBusy() {
 		return
 	}
 	mw.setUIBusy(true)
 	mw.state.currentFiles = files
+
+	// Release previous preview image reference (3.4)
+	mw.previewImg.Image = nil
+	mw.previewImg.Refresh()
 
 	// Immediately clear old state and hide preview
 	mw.promptEntry.SetText("")
 	mw.summaryEntry.SetText("")
 	mw.previewCont.Hide()
 
+	// 1.2. Capture mode before spawning the processing goroutine
+	currentMode := mw.state.mode
+
+	// 2.2. Create context for cancellation (120s total)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+
+	// 2.1. Add a timeout-based safety net for the busy flag
 	go func() {
+		time.Sleep(130 * time.Second)
+		if mw.isBusy() {
+			log.Printf("[WARN] Busy flag safety net triggered after 130s")
+			fyne.Do(func() {
+				mw.setUIBusy(false)
+				mw.statusLabel.SetText("Processing timed out - recovered")
+			})
+		}
+	}()
+
+	go func() {
+		defer cancel()
+		finished := false
+		defer func() {
+			if !finished {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC] %v", r)
+					done := make(chan struct{})
+					go func() {
+						fyne.Do(func() {
+							mw.setUIBusy(false)
+							dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
+							close(done)
+						})
+					}()
+					select {
+					case <-done:
+					case <-time.After(2 * time.Second):
+						log.Printf("[ERROR] fyne.Do timed out in panic recovery, forcing busy=false")
+						mw.state.mu.Lock()
+						mw.state.busy = false
+						mw.state.mu.Unlock()
+					}
+				}
+			}
+		}()
+
 		// Load thumbnail off-thread
 		var thumbImg image.Image
 		var thumbW, thumbH int
@@ -374,18 +436,58 @@ func (mw *MainWindow) processFiles(files []string) {
 		results := make([]*extractor.ExtractionResult, 0, len(files))
 		e := &extractor.PromptExtractor{}
 		for _, f := range files {
+			if ctx.Err() != nil {
+				log.Printf("[DEBUG] Processing timed out/cancelled")
+				break
+			}
+
 			var r *extractor.ExtractionResult
 			var err error
 			ext := strings.ToLower(filepath.Ext(f))
-			switch ext {
-			case ".json":
-				r, err = e.ExtractJSON(f)
-			case ".png":
-				if mw.state.mode == "ComfyUI" {
-					r, err = e.ExtractComfyUI(f)
-				} else {
-					r, err = e.ExtractParameters(f)
+
+			// 4.3 Validate PNG files before full processing (Check size)
+			if ext == ".png" {
+				info, err := os.Stat(f)
+				if err == nil && info.Size() > 200*1024*1024 { // 200MB limit
+					r = &extractor.ExtractionResult{
+						FileInfo: extractor.FileInfo{Filename: filepath.Base(f)},
+						Error:    "File too large (> 200MB)",
+					}
+					results = append(results, r)
+					continue
 				}
+			}
+
+			// 4.2. Per-file timeout
+			type extractRes struct {
+				r   *extractor.ExtractionResult
+				err error
+			}
+			fileChan := make(chan extractRes, 1)
+
+			go func(file string, currentExt string) {
+				var r *extractor.ExtractionResult
+				var err error
+				switch currentExt {
+				case ".json":
+					r, err = e.ExtractJSON(file)
+				case ".png":
+					if currentMode == "ComfyUI" {
+						r, err = e.ExtractComfyUI(file)
+					} else {
+						r, err = e.ExtractParameters(file)
+					}
+				}
+				fileChan <- extractRes{r, err}
+			}(f, ext)
+
+			select {
+			case res := <-fileChan:
+				r = res.r
+				err = res.err
+			case <-time.After(30 * time.Second):
+				log.Printf("[ERROR] Extraction timed out for file: %s", f)
+				err = fmt.Errorf("extraction timed out after 30s")
 			}
 
 			if err != nil {
@@ -407,6 +509,7 @@ func (mw *MainWindow) processFiles(files []string) {
 				mw.previewCont.Show()
 			}
 			mw.onExtractionFinished(results)
+			finished = true
 		})
 	}()
 }
@@ -504,6 +607,8 @@ func (mw *MainWindow) clearResults() {
 	mw.state.allPromptTexts = nil
 	mw.promptEntry.SetText("")
 	mw.summaryEntry.SetText("")
+	mw.previewImg.Image = nil
+	mw.previewImg.Refresh()
 	mw.previewCont.Hide()
 	mw.statusLabel.SetText("Ready")
 	mw.updateButtonStates()
@@ -594,6 +699,23 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 		return nil, 0, 0, err
 	}
 	defer f.Close()
+
+	// 3.3. Use image.DecodeConfig before full decode
+	config, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	// Reset file pointer for full decode
+	_, err = f.Seek(0, 0)
+	if err != nil {
+		return nil, 0, 0, err
+	}
+
+	// Dimension guardrail
+	if config.Width > 8192 || config.Height > 8192 {
+		return nil, config.Width, config.Height, fmt.Errorf("image too large (%dx%d)", config.Width, config.Height)
+	}
 
 	img, _, err := image.Decode(f)
 	if err != nil {

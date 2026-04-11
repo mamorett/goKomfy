@@ -507,10 +507,3 @@ func (e *PromptExtractor) extractPositiveFromParametersStrict(meta map[string]st
 
 	return "", false
 }
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}

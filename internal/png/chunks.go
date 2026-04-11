@@ -7,11 +7,17 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"log"
 	"os"
 )
 
 var (
 	pngSignature = []byte("\x89PNG\r\n\x1a\n")
+)
+
+const (
+	maxChunkLength      = 100 * 1024 * 1024 // 100 MB
+	maxDecompressedSize = 100 * 1024 * 1024 // 100 MB
 )
 
 // ReadTextChunks opens a PNG file and returns all text metadata as a map.
@@ -50,6 +56,16 @@ func ReadTextChunks(filePath string) (map[string]string, error) {
 			return nil, err
 		}
 
+		// 3.2. Add chunk size limits
+		if length > maxChunkLength {
+			log.Printf("[WARN] Skipping excessively large chunk: %d bytes", length)
+			// Skip data and CRC (4 bytes)
+			if _, err := f.Seek(int64(length)+4, io.SeekCurrent); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		data := make([]byte, length)
 		if _, err := io.ReadFull(f, data); err != nil {
 			return nil, err
@@ -86,8 +102,11 @@ func ReadTextChunks(filePath string) (map[string]string, error) {
 					zr, err := zlib.NewReader(bytes.NewReader(zlibData))
 					if err == nil {
 						var buf bytes.Buffer
-						if _, err := io.Copy(&buf, zr); err == nil {
+						// 4.4. Handle decompression bombs
+						if _, err := io.CopyN(&buf, zr, maxDecompressedSize); err == nil || err == io.EOF {
 							meta[key] = buf.String()
+						} else {
+							log.Printf("[WARN] Decompression limit hit for key: %s", key)
 						}
 						zr.Close()
 					}
@@ -111,8 +130,11 @@ func ReadTextChunks(filePath string) (map[string]string, error) {
 							zr, err := zlib.NewReader(bytes.NewReader(valData))
 							if err == nil {
 								var buf bytes.Buffer
-								if _, err := io.Copy(&buf, zr); err == nil {
+								// 4.4. Handle decompression bombs
+								if _, err := io.CopyN(&buf, zr, maxDecompressedSize); err == nil || err == io.EOF {
 									meta[key] = buf.String()
+								} else {
+									log.Printf("[WARN] Decompression limit hit for key: %s", key)
 								}
 								zr.Close()
 							}

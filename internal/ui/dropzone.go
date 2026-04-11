@@ -14,15 +14,13 @@ import (
 type DropZone struct {
 	widget.BaseWidget
 	label     *widget.Label
-	onDropped func(paths []string)
 	hovered   bool
 	blinking  bool
 }
 
-func NewDropZone(text string, onDropped func(paths []string)) *DropZone {
+func NewDropZone(text string) *DropZone {
 	d := &DropZone{
-		label:     widget.NewLabel(text),
-		onDropped: onDropped,
+		label: widget.NewLabel(text),
 	}
 	d.label.Alignment = fyne.TextAlignCenter
 	d.label.Wrapping = fyne.TextWrapWord
@@ -106,22 +104,9 @@ func (d *DropZone) Flash() {
 	d.Refresh()
 	go func() {
 		time.Sleep(150 * time.Millisecond)
-		d.blinking = false
-		d.Refresh()
+		fyne.Do(func() {
+			d.blinking = false
+			d.Refresh()
+		})
 	}()
-}
-
-func (d *DropZone) DroppedURIs(uris []fyne.URI) {
-	var paths []string
-	for _, u := range uris {
-		if u.Scheme() == "file" {
-			paths = append(paths, u.Path())
-		}
-	}
-	if len(paths) > 0 {
-		d.Flash()
-		if d.onDropped != nil {
-			d.onDropped(paths)
-		}
-	}
 }
