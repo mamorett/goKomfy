@@ -64,7 +64,7 @@ build: bundle-icon
 ifeq ($(OS),darwin)
 	@echo "→ Building macOS app bundle…"
 	cd $(CMD_KOMFY) && CGO_ENABLED=1 $(FYNE) package \
-		-os darwin -name $(APP_NAME) -icon $(ICON_NAME) -id $(APP_ID)
+		-os darwin -name $(APP_NAME) -icon logo_macos.png -id $(APP_ID)
 	mv $(CMD_KOMFY)/$(APP_NAME).app $(BUILD_DIR)/
 else ifeq ($(OS),linux)
 	@echo "→ Building Linux binaries…"
