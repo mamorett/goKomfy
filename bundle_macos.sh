@@ -19,21 +19,25 @@ GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 \
   go build -o "${MACOS_DIR}/${BINARY_NAME}" ./cmd/komfy
 
 # Handle icon (only if on macOS with iconutil/sips available)
-if command -v iconutil >/dev/null 2>&1 && command -v sips >/dev/null 2>&1; then
-    echo "Generating macOS ICNS icon..."
+LOGO_PATH="cmd/komfy/logo_macos.png"
+
+if [ -f "$LOGO_PATH" ] && command -v iconutil >/dev/null 2>&1 && command -v sips >/dev/null 2>&1; then
+    echo "Generating macOS ICNS icon from $LOGO_PATH..."
     mkdir -p logo.iconset
-    sips -z 16 16     logo.png --out logo.iconset/icon_16x16.png
-    sips -z 32 32     logo.png --out logo.iconset/icon_16x16@2x.png
-    sips -z 32 32     logo.png --out logo.iconset/icon_32x32.png
-    sips -z 64 64     logo.png --out logo.iconset/icon_32x32@2x.png
-    sips -z 128 128   logo.png --out logo.iconset/icon_128x128.png
-    sips -z 256 256   logo.png --out logo.iconset/icon_128x128@2x.png
-    sips -z 256 256   logo.png --out logo.iconset/icon_256x256.png
-    sips -z 512 512   logo.png --out logo.iconset/icon_256x256@2x.png
-    sips -z 512 512   logo.png --out logo.iconset/icon_512x512.png
-    sips -z 1024 1024 logo.png --out logo.iconset/icon_512x512@2x.png
+    sips -z 16 16     "$LOGO_PATH" --out logo.iconset/icon_16x16.png
+    sips -z 32 32     "$LOGO_PATH" --out logo.iconset/icon_16x16@2x.png
+    sips -z 32 32     "$LOGO_PATH" --out logo.iconset/icon_32x32.png
+    sips -z 64 64     "$LOGO_PATH" --out logo.iconset/icon_32x32@2x.png
+    sips -z 128 128   "$LOGO_PATH" --out logo.iconset/icon_128x128.png
+    sips -z 256 256   "$LOGO_PATH" --out logo.iconset/icon_128x128@2x.png
+    sips -z 256 256   "$LOGO_PATH" --out logo.iconset/icon_256x256.png
+    sips -z 512 512   "$LOGO_PATH" --out logo.iconset/icon_256x256@2x.png
+    sips -z 512 512   "$LOGO_PATH" --out logo.iconset/icon_512x512.png
+    sips -z 1024 1024 "$LOGO_PATH" --out logo.iconset/icon_512x512@2x.png
     iconutil -c icns logo.iconset -o "${RESOURCES_DIR}/icon.icns"
     rm -rf logo.iconset
+else
+    echo "Warning: logo.iconset generation skipped (source missing or tools unavailable)."
 fi
 
 # Create Info.plist
