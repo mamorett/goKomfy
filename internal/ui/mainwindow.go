@@ -13,6 +13,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -30,14 +31,21 @@ import (
 	"golang.org/x/image/draw"
 )
 
+const (
+	maxThumbnailSize     = 400 * 400 * 4     // RGBA bytes
+	maxMemoryBudget      = 500 * 1024 * 1024 // 500MB total budget
+	memoryAlertThreshold = 400 * 1024 * 1024 // 400MB alert threshold
+)
+
 type AppState struct {
-	mu              sync.Mutex
-	currentFiles    []string
-	currentResults  []*extractor.ExtractionResult
-	allPromptTexts  []string
-	mode            string // "ComfyUI" or "Parameters"
-	busy            bool
-	autoCopy        bool
+	mu             sync.Mutex
+	currentFiles   []string
+	currentResults []*extractor.ExtractionResult
+	allPromptTexts []string
+	mode           string // "ComfyUI" or "Parameters"
+	busy           bool
+	autoCopy       bool
+	memoryPressure bool
 }
 
 type MainWindow struct {
@@ -51,7 +59,7 @@ type MainWindow struct {
 	promptEntry   *ReadOnlyEntry
 	summaryEntry  *ReadOnlyEntry
 	progressBar   *widget.ProgressBarInfinite
-	
+
 	dropZone     *DropZone
 	previewImg   *canvas.Image
 	previewLabel *widget.Label
@@ -82,6 +90,18 @@ func NewMainWindow(a fyne.App) *MainWindow {
 }
 
 func (mw *MainWindow) setupUI() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if mw.checkMemoryPressure() {
+				fyne.Do(func() {
+					mw.statusLabel.SetText("High memory usage - consider clearing results")
+				})
+			}
+		}
+	}()
+
 	// 1. Header (Mode + Browse)
 	mw.modeSelect = widget.NewSelect([]string{"ComfyUI", "Parameters"}, func(s string) {
 		mw.state.mode = s
@@ -95,7 +115,7 @@ func (mw *MainWindow) setupUI() {
 	mw.autoCopyCheck = widget.NewCheck("Auto-copy to Clipboard", func(b bool) {
 		mw.state.autoCopy = b
 	})
-	
+
 	browseFilesBtn := widget.NewButtonWithIcon("Open Files", theme.FileIcon(), func() {
 		mw.browseFiles()
 	})
@@ -115,13 +135,13 @@ func (mw *MainWindow) setupUI() {
 	)
 
 	// 2. Center Content (Split Top/Bottom)
-	
+
 	// Top part of the split: Dropzone and Preview
 	mw.dropZone = NewDropZone("DRAG & DROP PNG/JSON HERE")
 
 	mw.previewImg = canvas.NewImageFromImage(nil)
 	mw.previewImg.FillMode = canvas.ImageFillContain
-	
+
 	// previewBox ensures the right side of the split has a stable size and doesn't jump
 	previewBoxCont := container.NewGridWrap(fyne.NewSize(300, 300), mw.previewImg)
 
@@ -208,7 +228,7 @@ func (mw *MainWindow) setupUI() {
 		nil,
 		mainSplit,
 	))
-	
+
 	mw.updateButtonStates()
 }
 
@@ -421,14 +441,23 @@ func (mw *MainWindow) processFiles(files []string) {
 			}
 		}()
 
-		// Load thumbnail off-thread
+		if mw.checkMemoryPressure() {
+			log.Printf("[WARN] Memory pressure detected, triggering cleanup")
+			fyne.Do(func() {
+				mw.triggerGarbageCollection()
+				mw.statusLabel.SetText("Memory cleanup in progress...")
+			})
+			time.Sleep(500 * time.Millisecond)
+		}
+
 		var thumbImg image.Image
 		var thumbW, thumbH int
 		if len(files) == 1 && strings.ToLower(filepath.Ext(files[0])) == ".png" {
-			img, w, h, err := loadThumbnail(files[0], 400)
-			if err == nil {
-				thumbImg = img
-				thumbW, thumbH = w, h
+			select {
+			case <-ctx.Done():
+				log.Printf("[DEBUG] Thumbnail loading cancelled")
+			case res := <-getThumbnailAsync(ctx, files[0], 400):
+				thumbImg, thumbW, thumbH = res.img, res.w, res.h
 			}
 		}
 
@@ -440,6 +469,9 @@ func (mw *MainWindow) processFiles(files []string) {
 				log.Printf("[DEBUG] Processing timed out/cancelled")
 				break
 			}
+
+			// Per-file timeout with cleanup
+			extractCtx, extractCancel := context.WithTimeout(ctx, 30*time.Second)
 
 			var r *extractor.ExtractionResult
 			var err error
@@ -454,21 +486,27 @@ func (mw *MainWindow) processFiles(files []string) {
 						Error:    "File too large (> 200MB)",
 					}
 					results = append(results, r)
+					extractCancel()
 					continue
 				}
 			}
 
-			// 4.2. Per-file timeout
 			type extractRes struct {
 				r   *extractor.ExtractionResult
 				err error
 			}
 			fileChan := make(chan extractRes, 1)
 
-			go func(file string, currentExt string) {
+			go func(file string, ext string, exCtx context.Context) {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[PANIC] Extraction: %v", r)
+					}
+				}()
+
 				var r *extractor.ExtractionResult
 				var err error
-				switch currentExt {
+				switch ext {
 				case ".json":
 					r, err = e.ExtractJSON(file)
 				case ".png":
@@ -478,17 +516,21 @@ func (mw *MainWindow) processFiles(files []string) {
 						r, err = e.ExtractParameters(file)
 					}
 				}
-				fileChan <- extractRes{r, err}
-			}(f, ext)
+				select {
+				case fileChan <- extractRes{r, err}:
+				case <-exCtx.Done():
+				}
+			}(f, ext, extractCtx)
 
 			select {
 			case res := <-fileChan:
 				r = res.r
 				err = res.err
-			case <-time.After(30 * time.Second):
+			case <-extractCtx.Done():
 				log.Printf("[ERROR] Extraction timed out for file: %s", f)
 				err = fmt.Errorf("extraction timed out after 30s")
 			}
+			extractCancel()
 
 			if err != nil {
 				r = &extractor.ExtractionResult{
@@ -498,6 +540,9 @@ func (mw *MainWindow) processFiles(files []string) {
 			}
 			results = append(results, r)
 		}
+
+		// Force GC after processing
+		runtime.GC()
 
 		// Post all UI updates back on the main thread
 		fyne.Do(func() {
@@ -577,12 +622,12 @@ func (mw *MainWindow) onExtractionFinished(results []*extractor.ExtractionResult
 	mw.promptEntry.SetText(strings.Join(promptLines, "\n"))
 	mw.summaryEntry.SetText(strings.Join(summaryLines, "\n"))
 	mw.statusLabel.SetText(fmt.Sprintf("Found %d prompts in %d files", totalPrompts, filesWithPrompts))
-	
+
 	if mw.state.autoCopy && len(allTexts) > 0 {
 		mw.copyAllPrompts()
 		mw.statusLabel.SetText(mw.statusLabel.Text + " [COPIED TO CLIPBOARD]")
 	}
-	
+
 	mw.setUIBusy(false)
 }
 
@@ -602,16 +647,24 @@ func (mw *MainWindow) copyFirstPrompt() {
 }
 
 func (mw *MainWindow) clearResults() {
+	mw.state.mu.Lock()
 	mw.state.currentFiles = nil
 	mw.state.currentResults = nil
 	mw.state.allPromptTexts = nil
+	mw.state.memoryPressure = false
+	mw.state.mu.Unlock()
+
 	mw.promptEntry.SetText("")
 	mw.summaryEntry.SetText("")
+
 	mw.previewImg.Image = nil
 	mw.previewImg.Refresh()
 	mw.previewCont.Hide()
+
 	mw.statusLabel.SetText("Ready")
 	mw.updateButtonStates()
+
+	runtime.GC()
 }
 
 func (mw *MainWindow) updateButtonStates() {
@@ -706,6 +759,13 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 		return nil, 0, 0, err
 	}
 
+	// Guardrail: Skip if estimated size exceeds budget
+	estimatedSize := int64(config.Width * config.Height * 4)
+	if estimatedSize > maxMemoryBudget {
+		log.Printf("[WARN] Thumbnail would exceed memory budget: %d bytes", estimatedSize)
+		return nil, config.Width, config.Height, fmt.Errorf("image too large for memory budget")
+	}
+
 	// Reset file pointer for full decode
 	_, err = f.Seek(0, 0)
 	if err != nil {
@@ -734,6 +794,12 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	newH := int(float64(origH) * scale)
 	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
 	draw.BiLinear.Scale(dst, dst.Bounds(), img, img.Bounds(), draw.Over, nil)
+
+	// Explicitly release original if it was a copy
+	if _, ok := img.(*image.RGBA); ok {
+		img = nil
+	}
+
 	return dst, origW, origH, nil
 }
 
@@ -788,5 +854,45 @@ func gcd(a, b int) int {
 		a, b = b, a%b
 	}
 	return a
+}
+
+func (mw *MainWindow) checkMemoryPressure() bool {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	if m.HeapAlloc > memoryAlertThreshold {
+		return true
+	}
+	return false
+}
+
+func (mw *MainWindow) triggerGarbageCollection() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	log.Printf("[INFO] Triggering garbage collection (HeapAlloc: %d MB)",
+		m.HeapAlloc/1024/1024)
+	runtime.GC()
+
+	time.Sleep(100 * time.Millisecond)
+}
+
+type thumbnailResult struct {
+	img image.Image
+	w   int
+	h   int
+}
+
+func getThumbnailAsync(ctx context.Context, filePath string, maxSize int) <-chan thumbnailResult {
+	ch := make(chan thumbnailResult, 1)
+	go func() {
+		img, w, h, err := loadThumbnail(filePath, maxSize)
+		if err == nil {
+			select {
+			case ch <- thumbnailResult{img, w, h}:
+			case <-ctx.Done():
+			}
+		}
+	}()
+	return ch
 }
 
