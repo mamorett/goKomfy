@@ -64,6 +64,10 @@ type MainWindow struct {
 	previewImg   *canvas.Image
 	previewLabel *widget.Label
 	previewCont  *fyne.Container
+	previewBoxCont *fyne.Container
+
+	promptScroll  *container.Scroll
+	summaryScroll *container.Scroll
 
 	copyAllBtn   *widget.Button
 	copyFirstBtn *widget.Button
@@ -91,9 +95,12 @@ func NewMainWindow(a fyne.App) *MainWindow {
 
 func (mw *MainWindow) setupUI() {
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(120 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
+			if mw.isBusy() {
+				continue // Don't STW during processing
+			}
 			if mw.checkMemoryPressure() {
 				fyne.Do(func() {
 					mw.statusLabel.SetText("High memory usage - consider clearing results")
@@ -143,13 +150,13 @@ func (mw *MainWindow) setupUI() {
 	mw.previewImg.FillMode = canvas.ImageFillContain
 
 	// previewBox ensures the right side of the split has a stable size and doesn't jump
-	previewBoxCont := container.NewGridWrap(fyne.NewSize(300, 300), mw.previewImg)
+	mw.previewBoxCont = container.NewGridWrap(fyne.NewSize(300, 300), mw.previewImg)
 
 	mw.previewLabel = widget.NewLabel("")
 	mw.previewLabel.Alignment = fyne.TextAlignCenter
 	mw.previewLabel.TextStyle = fyne.TextStyle{Monospace: true}
 
-	mw.previewCont = container.NewBorder(nil, mw.previewLabel, nil, nil, previewBoxCont)
+	mw.previewCont = container.NewBorder(nil, mw.previewLabel, nil, nil, mw.previewBoxCont)
 	mw.previewCont.Hide()
 
 	// Use an HSplit for DropZone | Preview
@@ -167,9 +174,12 @@ func (mw *MainWindow) setupUI() {
 	mw.summaryEntry = NewReadOnlyEntry()
 	mw.summaryEntry.Wrapping = fyne.TextWrapWord
 
+	mw.promptScroll = container.NewScroll(mw.promptEntry)
+	mw.summaryScroll = container.NewScroll(mw.summaryEntry)
+
 	tabs := container.NewAppTabs(
-		container.NewTabItemWithIcon("Extracted Prompts", theme.FileTextIcon(), container.NewScroll(mw.promptEntry)),
-		container.NewTabItemWithIcon("Summary", theme.InfoIcon(), container.NewScroll(mw.summaryEntry)),
+		container.NewTabItemWithIcon("Extracted Prompts", theme.FileTextIcon(), mw.promptScroll),
+		container.NewTabItemWithIcon("Summary", theme.InfoIcon(), mw.summaryScroll),
 	)
 
 	// MAIN VSplit (Top Area vs Results)
@@ -441,15 +451,6 @@ func (mw *MainWindow) processFiles(files []string) {
 			}
 		}()
 
-		if mw.checkMemoryPressure() {
-			log.Printf("[WARN] Memory pressure detected, triggering cleanup")
-			fyne.Do(func() {
-				mw.triggerGarbageCollection()
-				mw.statusLabel.SetText("Memory cleanup in progress...")
-			})
-			time.Sleep(500 * time.Millisecond)
-		}
-
 		var thumbImg image.Image
 		var thumbW, thumbH int
 		if len(files) == 1 && strings.ToLower(filepath.Ext(files[0])) == ".png" {
@@ -504,6 +505,11 @@ func (mw *MainWindow) processFiles(files []string) {
 					}
 				}()
 
+				var opts *extractor.ExtractionOptions
+				if thumbImg != nil {
+					opts = &extractor.ExtractionOptions{Width: thumbW, Height: thumbH}
+				}
+
 				var r *extractor.ExtractionResult
 				var err error
 				switch ext {
@@ -511,9 +517,9 @@ func (mw *MainWindow) processFiles(files []string) {
 					r, err = e.ExtractJSON(file)
 				case ".png":
 					if currentMode == "ComfyUI" {
-						r, err = e.ExtractComfyUI(file)
+						r, err = e.ExtractComfyUI(file, opts)
 					} else {
-						r, err = e.ExtractParameters(file)
+						r, err = e.ExtractParameters(file, opts)
 					}
 				}
 				select {
@@ -541,14 +547,18 @@ func (mw *MainWindow) processFiles(files []string) {
 			results = append(results, r)
 		}
 
-		// Force GC after processing
-		runtime.GC()
-
 		// Post all UI updates back on the main thread
 		fyne.Do(func() {
 			if thumbImg != nil {
-				mw.previewImg.Image = thumbImg
-				mw.previewImg.Refresh()
+				// Create a fresh canvas.Image to force Fyne to release old textures
+				newImg := canvas.NewImageFromImage(thumbImg)
+				newImg.FillMode = canvas.ImageFillContain
+
+				// Replace the image in the preview container
+				mw.previewBoxCont.Objects[0] = newImg
+				mw.previewBoxCont.Refresh()
+				mw.previewImg = newImg // Update the reference
+
 				ratioStr := calculateAspectRatio(thumbW, thumbH)
 				mw.previewLabel.SetText(fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(files[0])))
 				mw.previewCont.Show()
@@ -654,17 +664,30 @@ func (mw *MainWindow) clearResults() {
 	mw.state.memoryPressure = false
 	mw.state.mu.Unlock()
 
-	mw.promptEntry.SetText("")
-	mw.summaryEntry.SetText("")
+	// Recreate text widgets to fully release internal state
+	mw.promptEntry = NewReadOnlyEntry()
+	mw.promptEntry.Wrapping = fyne.TextWrapWord
+	mw.promptEntry.TextStyle = fyne.TextStyle{Monospace: true}
 
-	mw.previewImg.Image = nil
-	mw.previewImg.Refresh()
+	mw.summaryEntry = NewReadOnlyEntry()
+	mw.summaryEntry.Wrapping = fyne.TextWrapWord
+
+	// Update the scroll containers
+	mw.promptScroll.Content = mw.promptEntry
+	mw.promptScroll.Refresh()
+	mw.summaryScroll.Content = mw.summaryEntry
+	mw.summaryScroll.Refresh()
+
+	// Reset preview
+	newImg := canvas.NewImageFromImage(nil)
+	newImg.FillMode = canvas.ImageFillContain
+	mw.previewBoxCont.Objects[0] = newImg
+	mw.previewBoxCont.Refresh()
+	mw.previewImg = newImg
 	mw.previewCont.Hide()
 
 	mw.statusLabel.SetText("Ready")
 	mw.updateButtonStates()
-
-	runtime.GC()
 }
 
 func (mw *MainWindow) updateButtonStates() {
@@ -795,10 +818,8 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
 	draw.BiLinear.Scale(dst, dst.Bounds(), img, img.Bounds(), draw.Over, nil)
 
-	// Explicitly release original if it was a copy
-	if _, ok := img.(*image.RGBA); ok {
-		img = nil
-	}
+	// Explicitly release original to free memory faster
+	img = nil
 
 	return dst, origW, origH, nil
 }
@@ -864,16 +885,6 @@ func (mw *MainWindow) checkMemoryPressure() bool {
 		return true
 	}
 	return false
-}
-
-func (mw *MainWindow) triggerGarbageCollection() {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	log.Printf("[INFO] Triggering garbage collection (HeapAlloc: %d MB)",
-		m.HeapAlloc/1024/1024)
-	runtime.GC()
-
-	time.Sleep(100 * time.Millisecond)
 }
 
 type thumbnailResult struct {

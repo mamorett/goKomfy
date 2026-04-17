@@ -37,21 +37,39 @@ type ExtractionResult struct {
 	Error            string
 }
 
+// ExtractionOptions allows passing pre-calculated dimensions.
+type ExtractionOptions struct {
+	Width  int
+	Height int
+}
+
 type PromptExtractor struct{}
 
-func (e *PromptExtractor) ExtractComfyUI(filePath string) (*ExtractionResult, error) {
-	meta, err := png.ReadTextChunks(filePath)
-	if err != nil {
-		return nil, err
-	}
-
+func (e *PromptExtractor) ExtractComfyUI(filePath string, opts ...*ExtractionOptions) (*ExtractionResult, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	config, _, err := image.DecodeConfig(f)
+	var w, h int
+	if len(opts) > 0 && opts[0] != nil && opts[0].Width > 0 {
+		w = opts[0].Width
+		h = opts[0].Height
+	} else {
+		config, _, err := image.DecodeConfig(f)
+		if err != nil {
+			return nil, err
+		}
+		w = config.Width
+		h = config.Height
+		// Seek back to start for metadata reading
+		if _, err := f.Seek(0, 0); err != nil {
+			return nil, err
+		}
+	}
+
+	meta, err := png.ReadTextChunksFromReader(f)
 	if err != nil {
 		return nil, err
 	}
@@ -59,8 +77,8 @@ func (e *PromptExtractor) ExtractComfyUI(filePath string) (*ExtractionResult, er
 	result := &ExtractionResult{
 		FileInfo: FileInfo{
 			Filename: filepath.Base(filePath),
-			Width:    config.Width,
-			Height:   config.Height,
+			Width:    w,
+			Height:   h,
 			Mode:     "PNG",
 		},
 		ExtractionMethod: "comfyui",
@@ -95,19 +113,31 @@ func (e *PromptExtractor) ExtractComfyUI(filePath string) (*ExtractionResult, er
 	return result, nil
 }
 
-func (e *PromptExtractor) ExtractParameters(filePath string) (*ExtractionResult, error) {
-	meta, err := png.ReadTextChunks(filePath)
-	if err != nil {
-		return nil, err
-	}
-
+func (e *PromptExtractor) ExtractParameters(filePath string, opts ...*ExtractionOptions) (*ExtractionResult, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
 
-	config, _, err := image.DecodeConfig(f)
+	var w, h int
+	if len(opts) > 0 && opts[0] != nil && opts[0].Width > 0 {
+		w = opts[0].Width
+		h = opts[0].Height
+	} else {
+		config, _, err := image.DecodeConfig(f)
+		if err != nil {
+			return nil, err
+		}
+		w = config.Width
+		h = config.Height
+		// Seek back to start for metadata reading
+		if _, err := f.Seek(0, 0); err != nil {
+			return nil, err
+		}
+	}
+
+	meta, err := png.ReadTextChunksFromReader(f)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +145,8 @@ func (e *PromptExtractor) ExtractParameters(filePath string) (*ExtractionResult,
 	result := &ExtractionResult{
 		FileInfo: FileInfo{
 			Filename: filepath.Base(filePath),
-			Width:    config.Width,
-			Height:   config.Height,
+			Width:    w,
+			Height:   h,
 			Mode:     "PNG",
 		},
 		ExtractionMethod: "parameters",

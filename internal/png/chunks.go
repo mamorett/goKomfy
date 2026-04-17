@@ -30,6 +30,11 @@ func ReadTextChunks(filePath string) (map[string]string, error) {
 	}
 	defer f.Close()
 
+	return ReadTextChunksFromReader(f)
+}
+
+// ReadTextChunksFromReader reads text metadata from an io.ReadSeeker.
+func ReadTextChunksFromReader(f io.ReadSeeker) (map[string]string, error) {
 	// 1. Verify PNG signature
 	sig := make([]byte, 8)
 	if _, err := io.ReadFull(f, sig); err != nil {
