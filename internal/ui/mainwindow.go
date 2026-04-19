@@ -414,13 +414,16 @@ func (mw *MainWindow) processFiles(files []string) {
 
 	// 2.1. Add a timeout-based safety net for the busy flag
 	go func() {
-		time.Sleep(130 * time.Second)
-		if mw.isBusy() {
-			log.Printf("[WARN] Busy flag safety net triggered after 130s")
-			fyne.Do(func() {
-				mw.setUIBusy(false)
-				mw.statusLabel.SetText("Processing timed out - recovered")
-			})
+		select {
+		case <-ctx.Done():
+		case <-time.After(130 * time.Second):
+			if mw.isBusy() {
+				log.Printf("[WARN] Busy flag safety net triggered after 130s")
+				fyne.Do(func() {
+					mw.setUIBusy(false)
+					mw.statusLabel.SetText("Processing timed out - recovered")
+				})
+			}
 		}
 	}()
 
@@ -499,6 +502,7 @@ func (mw *MainWindow) processFiles(files []string) {
 			fileChan := make(chan extractRes, 1)
 
 			go func(file string, ext string, exCtx context.Context) {
+				defer close(fileChan)
 				defer func() {
 					if r := recover(); r != nil {
 						log.Printf("[PANIC] Extraction: %v", r)
@@ -896,6 +900,7 @@ type thumbnailResult struct {
 func getThumbnailAsync(ctx context.Context, filePath string, maxSize int) <-chan thumbnailResult {
 	ch := make(chan thumbnailResult, 1)
 	go func() {
+		defer close(ch)
 		img, w, h, err := loadThumbnail(filePath, maxSize)
 		if err == nil {
 			select {
