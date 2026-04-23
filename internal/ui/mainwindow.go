@@ -8,12 +8,10 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
-	"io/fs"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -32,20 +30,17 @@ import (
 )
 
 const (
-	maxThumbnailSize     = 400 * 400 * 4     // RGBA bytes
-	maxMemoryBudget      = 500 * 1024 * 1024 // 500MB total budget
-	memoryAlertThreshold = 400 * 1024 * 1024 // 400MB alert threshold
+	maxThumbnailSize = 400 * 400 * 4 // RGBA bytes
 )
 
 type AppState struct {
-	mu             sync.Mutex
-	currentFiles   []string
-	currentResults []*extractor.ExtractionResult
-	allPromptTexts []string
-	mode           string // "ComfyUI" or "Parameters"
-	busy           bool
-	autoCopy       bool
-	memoryPressure bool
+	mu            sync.Mutex
+	currentFile   string
+	currentResult *extractor.ExtractionResult
+	promptTexts   []string
+	mode          string // "ComfyUI" or "Parameters"
+	busy          bool
+	autoCopy      bool
 }
 
 type MainWindow struct {
@@ -94,27 +89,12 @@ func NewMainWindow(a fyne.App) *MainWindow {
 }
 
 func (mw *MainWindow) setupUI() {
-	go func() {
-		ticker := time.NewTicker(120 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			if mw.isBusy() {
-				continue // Don't STW during processing
-			}
-			if mw.checkMemoryPressure() {
-				fyne.Do(func() {
-					mw.statusLabel.SetText("High memory usage - consider clearing results")
-				})
-			}
-		}
-	}()
-
 	// 1. Header (Mode + Browse)
 	mw.modeSelect = widget.NewSelect([]string{"ComfyUI", "Parameters"}, func(s string) {
 		mw.state.mode = s
-		// Re-extract if we already have files loaded
-		if len(mw.state.currentFiles) > 0 && !mw.state.busy {
-			mw.processFiles(mw.state.currentFiles)
+		// Re-extract if we already have a file loaded
+		if mw.state.currentFile != "" && !mw.state.busy {
+			mw.processFile(mw.state.currentFile)
 		}
 	})
 	mw.modeSelect.SetSelected(mw.state.mode)
@@ -123,11 +103,8 @@ func (mw *MainWindow) setupUI() {
 		mw.state.autoCopy = b
 	})
 
-	browseFilesBtn := widget.NewButtonWithIcon("Open Files", theme.FileIcon(), func() {
+	browseFilesBtn := widget.NewButtonWithIcon("Open File", theme.FileIcon(), func() {
 		mw.browseFiles()
-	})
-	browseFolderBtn := widget.NewButtonWithIcon("Open Folder", theme.FolderOpenIcon(), func() {
-		mw.browseFolder()
 	})
 
 	header := container.NewHBox(
@@ -138,7 +115,6 @@ func (mw *MainWindow) setupUI() {
 		mw.autoCopyCheck,
 		widget.NewSeparator(),
 		browseFilesBtn,
-		browseFolderBtn,
 	)
 
 	// 2. Center Content (Split Top/Bottom)
@@ -218,15 +194,9 @@ func (mw *MainWindow) setupUI() {
 
 	// Set window level drop as well
 	mw.window.SetOnDropped(func(p fyne.Position, uris []fyne.URI) {
-		var paths []string
-		for _, u := range uris {
-			if u.Scheme() == "file" {
-				paths = append(paths, u.Path())
-			}
-		}
-		if len(paths) > 0 {
+		if len(uris) > 0 && uris[0].Scheme() == "file" {
 			mw.dropZone.Flash()
-			mw.loadFiles(paths)
+			mw.loadFile(uris[0].Path())
 		}
 	})
 
@@ -274,8 +244,7 @@ func (mw *MainWindow) setupShortcuts() {
 
 func (mw *MainWindow) setupMenu() {
 	fileMenu := fyne.NewMenu("File",
-		fyne.NewMenuItem("Open File(s)...", mw.browseFiles),
-		fyne.NewMenuItem("Open Folder...", mw.browseFolder),
+		fyne.NewMenuItem("Open File...", mw.browseFiles),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Save to File...", mw.saveToFile),
 		fyne.NewMenuItemSeparator(),
@@ -311,17 +280,7 @@ func (mw *MainWindow) browseFiles() {
 			return
 		}
 		defer r.Close()
-		mw.loadFiles([]string{r.URI().Path()})
-	}, mw.window)
-	d.Show()
-}
-
-func (mw *MainWindow) browseFolder() {
-	d := dialog.NewFolderOpen(func(lu fyne.ListableURI, err error) {
-		if err != nil || lu == nil {
-			return
-		}
-		mw.loadFiles([]string{lu.Path()})
+		mw.loadFile(r.URI().Path())
 	}, mw.window)
 	d.Show()
 }
@@ -332,48 +291,18 @@ func (mw *MainWindow) isBusy() bool {
 	return mw.state.busy
 }
 
-func (mw *MainWindow) loadFiles(paths []string) {
-	// If busy, we simply ignore new drops instead of showing a blocking dialog.
-	// This prevents the "double-drop" or rapid drop from freezing the app with dialogs.
+func (mw *MainWindow) loadFile(path string) {
 	if mw.isBusy() {
 		mw.statusLabel.SetText("Processing in progress — please wait...")
-		log.Printf("[DEBUG] Drop rejected because app is busy")
-		return
-	}
-	log.Printf("[DEBUG] Processing %d files", len(paths))
-
-	var valid []string
-	for _, p := range paths {
-		info, err := os.Stat(p)
-		if err != nil {
-			continue
-		}
-		if info.IsDir() {
-			filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
-				if err != nil {
-					return nil
-				}
-				if !d.IsDir() {
-					ext := strings.ToLower(filepath.Ext(path))
-					if ext == ".png" || ext == ".json" {
-						valid = append(valid, path)
-					}
-				}
-				return nil
-			})
-		} else {
-			ext := strings.ToLower(filepath.Ext(p))
-			if ext == ".png" || ext == ".json" {
-				valid = append(valid, p)
-			}
-		}
-	}
-
-	if len(valid) == 0 {
 		return
 	}
 
-	mw.processFiles(valid)
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".png" && ext != ".json" {
+		return
+	}
+
+	mw.processFile(path)
 }
 
 func (mw *MainWindow) setUIBusy(busy bool) {
@@ -390,14 +319,14 @@ func (mw *MainWindow) setUIBusy(busy bool) {
 	mw.updateButtonStates()
 }
 
-func (mw *MainWindow) processFiles(files []string) {
+func (mw *MainWindow) processFile(file string) {
 	if mw.isBusy() {
 		return
 	}
 	mw.setUIBusy(true)
-	mw.state.currentFiles = files
+	mw.state.currentFile = file
 
-	// Release previous preview image reference (3.4)
+	// Release previous preview image reference
 	mw.previewImg.Image = nil
 	mw.previewImg.Refresh()
 
@@ -406,13 +335,10 @@ func (mw *MainWindow) processFiles(files []string) {
 	mw.summaryEntry.SetText("")
 	mw.previewCont.Hide()
 
-	// 1.2. Capture mode before spawning the processing goroutine
 	currentMode := mw.state.mode
-
-	// 2.2. Create context for cancellation (120s total)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 
-	// 2.1. Add a timeout-based safety net for the busy flag
+	// Add a timeout-based safety net for the busy flag
 	go func() {
 		select {
 		case <-ctx.Done():
@@ -434,121 +360,65 @@ func (mw *MainWindow) processFiles(files []string) {
 			if !finished {
 				if r := recover(); r != nil {
 					log.Printf("[PANIC] %v", r)
-					done := make(chan struct{})
-					go func() {
-						fyne.Do(func() {
-							mw.setUIBusy(false)
-							dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
-							close(done)
-						})
-					}()
-					select {
-					case <-done:
-					case <-time.After(2 * time.Second):
-						log.Printf("[ERROR] fyne.Do timed out in panic recovery, forcing busy=false")
-						mw.state.mu.Lock()
-						mw.state.busy = false
-						mw.state.mu.Unlock()
-					}
+					fyne.Do(func() {
+						mw.setUIBusy(false)
+						dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
+					})
 				}
 			}
 		}()
 
 		var thumbImg image.Image
 		var thumbW, thumbH int
-		if len(files) == 1 && strings.ToLower(filepath.Ext(files[0])) == ".png" {
+		if strings.ToLower(filepath.Ext(file)) == ".png" {
 			select {
 			case <-ctx.Done():
 				log.Printf("[DEBUG] Thumbnail loading cancelled")
-			case res := <-getThumbnailAsync(ctx, files[0], 400):
+			case res := <-getThumbnailAsync(ctx, file, 400):
 				thumbImg, thumbW, thumbH = res.img, res.w, res.h
 			}
 		}
 
 		// Run extraction
-		results := make([]*extractor.ExtractionResult, 0, len(files))
 		e := &extractor.PromptExtractor{}
-		for _, f := range files {
-			if ctx.Err() != nil {
-				log.Printf("[DEBUG] Processing timed out/cancelled")
-				break
-			}
+		var result *extractor.ExtractionResult
+		var err error
+		ext := strings.ToLower(filepath.Ext(file))
 
-			// Per-file timeout with cleanup
-			extractCtx, extractCancel := context.WithTimeout(ctx, 30*time.Second)
-
-			var r *extractor.ExtractionResult
-			var err error
-			ext := strings.ToLower(filepath.Ext(f))
-
-			// 4.3 Validate PNG files before full processing (Check size)
-			if ext == ".png" {
-				info, err := os.Stat(f)
-				if err == nil && info.Size() > 200*1024*1024 { // 200MB limit
-					r = &extractor.ExtractionResult{
-						FileInfo: extractor.FileInfo{Filename: filepath.Base(f)},
-						Error:    "File too large (> 200MB)",
-					}
-					results = append(results, r)
-					extractCancel()
-					continue
+		// Validate PNG files before full processing (Check size)
+		if ext == ".png" {
+			info, errStat := os.Stat(file)
+			if errStat == nil && info.Size() > 200*1024*1024 { // 200MB limit
+				result = &extractor.ExtractionResult{
+					FileInfo: extractor.FileInfo{Filename: filepath.Base(file)},
+					Error:    "File too large (> 200MB)",
 				}
 			}
+		}
 
-			type extractRes struct {
-				r   *extractor.ExtractionResult
-				err error
+		if result == nil {
+			var opts *extractor.ExtractionOptions
+			if thumbImg != nil {
+				opts = &extractor.ExtractionOptions{Width: thumbW, Height: thumbH}
 			}
-			fileChan := make(chan extractRes, 1)
 
-			go func(file string, ext string, exCtx context.Context) {
-				defer close(fileChan)
-				defer func() {
-					if r := recover(); r != nil {
-						log.Printf("[PANIC] Extraction: %v", r)
-					}
-				}()
-
-				var opts *extractor.ExtractionOptions
-				if thumbImg != nil {
-					opts = &extractor.ExtractionOptions{Width: thumbW, Height: thumbH}
+			switch ext {
+			case ".json":
+				result, err = e.ExtractJSON(file)
+			case ".png":
+				if currentMode == "ComfyUI" {
+					result, err = e.ExtractComfyUI(file, opts)
+				} else {
+					result, err = e.ExtractParameters(file, opts)
 				}
-
-				var r *extractor.ExtractionResult
-				var err error
-				switch ext {
-				case ".json":
-					r, err = e.ExtractJSON(file)
-				case ".png":
-					if currentMode == "ComfyUI" {
-						r, err = e.ExtractComfyUI(file, opts)
-					} else {
-						r, err = e.ExtractParameters(file, opts)
-					}
-				}
-				select {
-				case fileChan <- extractRes{r, err}:
-				case <-exCtx.Done():
-				}
-			}(f, ext, extractCtx)
-
-			select {
-			case res := <-fileChan:
-				r = res.r
-				err = res.err
-			case <-extractCtx.Done():
-				log.Printf("[ERROR] Extraction timed out for file: %s", f)
-				err = fmt.Errorf("extraction timed out after 30s")
 			}
-			extractCancel()
 
 			if err != nil {
-				r = &extractor.ExtractionResult{
-					FileInfo: extractor.FileInfo{Filename: filepath.Base(f)},
+				result = &extractor.ExtractionResult{
+					FileInfo: extractor.FileInfo{Filename: filepath.Base(file)},
 					Error:    err.Error(),
 				}
 			}
-			results = append(results, r)
 		}
 
 		// Post all UI updates back on the main thread
@@ -564,39 +434,28 @@ func (mw *MainWindow) processFiles(files []string) {
 				mw.previewImg = newImg // Update the reference
 
 				ratioStr := calculateAspectRatio(thumbW, thumbH)
-				mw.previewLabel.SetText(fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(files[0])))
+				mw.previewLabel.SetText(fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(file)))
 				mw.previewCont.Show()
 			}
-			mw.onExtractionFinished(results)
+			mw.onExtractionFinished(result)
 			finished = true
 		})
 	}()
 }
 
-func (mw *MainWindow) onExtractionFinished(results []*extractor.ExtractionResult) {
+func (mw *MainWindow) onExtractionFinished(result *extractor.ExtractionResult) {
 	var promptLines []string
 	var summaryLines []string
 	var allTexts []string
 
-	totalPrompts := 0
-	filesWithPrompts := 0
-
-	for i, result := range results {
-		prompts := result.PositivePrompts
-		if len(prompts) == 0 {
-			if result.Error != "" {
-				summaryLines = append(summaryLines, fmt.Sprintf("Error in %s: %s", result.FileInfo.Filename, result.Error))
-			}
-			continue
+	prompts := result.PositivePrompts
+	if len(prompts) == 0 {
+		if result.Error != "" {
+			summaryLines = append(summaryLines, fmt.Sprintf("Error in %s: %s", result.FileInfo.Filename, result.Error))
+		} else {
+			summaryLines = append(summaryLines, fmt.Sprintf("No prompts found in %s", result.FileInfo.Filename))
 		}
-		filesWithPrompts++
-		totalPrompts += len(prompts)
-
-		if len(results) > 1 {
-			promptLines = append(promptLines,
-				fmt.Sprintf("=== %s [%s] ===", result.FileInfo.Filename, result.ExtractionMethod))
-		}
-
+	} else {
 		for j, p := range prompts {
 			if len(prompts) > 1 {
 				promptLines = append(promptLines, fmt.Sprintf("\nPrompt %d - %s:", j+1, p.Title))
@@ -608,34 +467,26 @@ func (mw *MainWindow) onExtractionFinished(results []*extractor.ExtractionResult
 				promptLines = append(promptLines, "")
 			}
 		}
-		if i < len(results)-1 {
-			promptLines = append(promptLines, "\n"+strings.Repeat("=", 60)+"\n")
-		}
 
 		summaryLines = append(summaryLines, fmt.Sprintf("File: %s", result.FileInfo.Filename))
-		summaryLines = append(summaryLines, fmt.Sprintf("  Method: %s", result.ExtractionMethod))
-		summaryLines = append(summaryLines, fmt.Sprintf("  Prompts found: %d", len(prompts)))
-		summaryLines = append(summaryLines, "")
+		summaryLines = append(summaryLines, fmt.Sprintf("Method: %s", result.ExtractionMethod))
+		summaryLines = append(summaryLines, fmt.Sprintf("Prompts found: %d", len(prompts)))
 	}
 
 	summaryHeader := []string{
 		"EXTRACTION SUMMARY",
 		strings.Repeat("-", 20),
-		fmt.Sprintf("Total files processed: %d", len(results)),
-		fmt.Sprintf("Files with prompts:    %d", filesWithPrompts),
-		fmt.Sprintf("Total prompts found:   %d", totalPrompts),
-		strings.Repeat("-", 20),
 		"",
 	}
 	summaryLines = append(summaryHeader, summaryLines...)
 
-	mw.state.currentResults = results
-	mw.state.allPromptTexts = allTexts
+	mw.state.currentResult = result
+	mw.state.promptTexts = allTexts
 
 	// Update UI on main thread
 	mw.promptEntry.SetText(strings.Join(promptLines, "\n"))
 	mw.summaryEntry.SetText(strings.Join(summaryLines, "\n"))
-	mw.statusLabel.SetText(fmt.Sprintf("Found %d prompts in %d files", totalPrompts, filesWithPrompts))
+	mw.statusLabel.SetText(fmt.Sprintf("Found %d prompts in %s", len(allTexts), result.FileInfo.Filename))
 
 	if mw.state.autoCopy && len(allTexts) > 0 {
 		mw.copyAllPrompts()
@@ -646,26 +497,25 @@ func (mw *MainWindow) onExtractionFinished(results []*extractor.ExtractionResult
 }
 
 func (mw *MainWindow) copyAllPrompts() {
-	if len(mw.state.allPromptTexts) == 0 {
+	if len(mw.state.promptTexts) == 0 {
 		return
 	}
-	text := strings.Join(mw.state.allPromptTexts, "\n\n")
+	text := strings.Join(mw.state.promptTexts, "\n\n")
 	clipboard.WriteAll(text)
 }
 
 func (mw *MainWindow) copyFirstPrompt() {
-	if len(mw.state.allPromptTexts) == 0 {
+	if len(mw.state.promptTexts) == 0 {
 		return
 	}
-	clipboard.WriteAll(mw.state.allPromptTexts[0])
+	clipboard.WriteAll(mw.state.promptTexts[0])
 }
 
 func (mw *MainWindow) clearResults() {
 	mw.state.mu.Lock()
-	mw.state.currentFiles = nil
-	mw.state.currentResults = nil
-	mw.state.allPromptTexts = nil
-	mw.state.memoryPressure = false
+	mw.state.currentFile = ""
+	mw.state.currentResult = nil
+	mw.state.promptTexts = nil
 	mw.state.mu.Unlock()
 
 	// Recreate text widgets to fully release internal state
@@ -695,7 +545,7 @@ func (mw *MainWindow) clearResults() {
 }
 
 func (mw *MainWindow) updateButtonStates() {
-	hasResults := len(mw.state.allPromptTexts) > 0 && !mw.state.busy
+	hasResults := len(mw.state.promptTexts) > 0 && !mw.state.busy
 	if hasResults {
 		mw.copyAllBtn.Enable()
 		mw.copyFirstBtn.Enable()
@@ -706,7 +556,7 @@ func (mw *MainWindow) updateButtonStates() {
 		mw.saveBtn.Disable()
 	}
 
-	if mw.state.busy || (len(mw.state.currentFiles) == 0) {
+	if mw.state.busy || (mw.state.currentFile == "") {
 		mw.clearBtn.Disable()
 	} else {
 		mw.clearBtn.Enable()
@@ -714,16 +564,13 @@ func (mw *MainWindow) updateButtonStates() {
 }
 
 func (mw *MainWindow) saveToFile() {
-	if len(mw.state.allPromptTexts) == 0 {
+	if len(mw.state.promptTexts) == 0 {
 		return
 	}
 
-	defaultName := "extracted_prompts.txt"
-	if len(mw.state.currentFiles) == 1 {
-		base := strings.TrimSuffix(filepath.Base(mw.state.currentFiles[0]),
-			filepath.Ext(mw.state.currentFiles[0]))
-		defaultName = base + "_prompts.txt"
-	}
+	base := strings.TrimSuffix(filepath.Base(mw.state.currentFile),
+		filepath.Ext(mw.state.currentFile))
+	defaultName := base + "_prompts.txt"
 
 	d := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
 		if w == nil || err != nil {
@@ -736,32 +583,17 @@ func (mw *MainWindow) saveToFile() {
 		fmt.Fprintln(writer, "COMFYUI POSITIVE PROMPTS EXTRACTION")
 		fmt.Fprintln(writer, strings.Repeat("=", 60))
 		fmt.Fprintf(writer, "\nExtractor mode: %s\n", mw.state.mode)
-		fmt.Fprintf(writer, "Files processed: %d\n", len(mw.state.currentFiles))
-		fmt.Fprintf(writer, "Total prompts: %d\n", len(mw.state.allPromptTexts))
+		fmt.Fprintf(writer, "File processed: %s\n", mw.state.currentFile)
+		fmt.Fprintf(writer, "Total prompts: %d\n", len(mw.state.promptTexts))
 		fmt.Fprintf(writer, "Extraction date: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 		fmt.Fprintln(writer, "\n"+strings.Repeat("=", 60))
 
-		promptIdx := 0
-		for i, result := range mw.state.currentResults {
-			if len(result.PositivePrompts) == 0 {
-				continue
+		result := mw.state.currentResult
+		for j, p := range result.PositivePrompts {
+			if len(result.PositivePrompts) > 1 {
+				fmt.Fprintf(writer, "Prompt %d - %s:\n%s\n", j+1, p.Title, strings.Repeat("-", 40))
 			}
-			if len(mw.state.currentResults) > 1 {
-				fmt.Fprintf(writer, "FILE: %s\nMethod: %s\n", result.FileInfo.Filename, result.ExtractionMethod)
-				fmt.Fprintln(writer, strings.Repeat("-", 60))
-			}
-			for j, p := range result.PositivePrompts {
-				if len(result.PositivePrompts) > 1 {
-					fmt.Fprintf(writer, "Prompt %d - %s:\n%s\n", j+1, p.Title, strings.Repeat("-", 40))
-				}
-				if promptIdx < len(mw.state.allPromptTexts) {
-					fmt.Fprintln(writer, mw.state.allPromptTexts[promptIdx])
-					promptIdx++
-				}
-			}
-			if i < len(mw.state.currentResults)-1 {
-				fmt.Fprintln(writer, "\n"+strings.Repeat("=", 60))
-			}
+			fmt.Fprintln(writer, p.Text)
 		}
 		writer.Flush()
 	}, mw.window)
@@ -784,13 +616,6 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	config, _, err := image.DecodeConfig(f)
 	if err != nil {
 		return nil, 0, 0, err
-	}
-
-	// Guardrail: Skip if estimated size exceeds budget
-	estimatedSize := int64(config.Width * config.Height * 4)
-	if estimatedSize > maxMemoryBudget {
-		log.Printf("[WARN] Thumbnail would exceed memory budget: %d bytes", estimatedSize)
-		return nil, config.Width, config.Height, fmt.Errorf("image too large for memory budget")
 	}
 
 	// Reset file pointer for full decode
@@ -879,16 +704,6 @@ func gcd(a, b int) int {
 		a, b = b, a%b
 	}
 	return a
-}
-
-func (mw *MainWindow) checkMemoryPressure() bool {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-
-	if m.HeapAlloc > memoryAlertThreshold {
-		return true
-	}
-	return false
 }
 
 type thumbnailResult struct {
