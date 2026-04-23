@@ -14,71 +14,45 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: komfy-cli <file1> [file2] ...")
+		fmt.Fprintln(os.Stderr, "Usage: komfy-cli <file>")
 		os.Exit(1)
 	}
 
-	// Expand globs manually (in case shell didn't expand)
-	var files []string
-	for _, pattern := range args {
-		matches, err := filepath.Glob(pattern)
-		if err != nil || len(matches) == 0 {
-			if _, statErr := os.Stat(pattern); statErr == nil {
-				matches = []string{pattern}
-			}
-		}
-		files = append(files, matches...)
-	}
-
-	// Deduplicate
-	seen := map[string]bool{}
-	var unique []string
-	for _, f := range files {
-		abs, err := filepath.Abs(f)
-		if err != nil {
-			abs = f
-		}
-		if !seen[abs] {
-			seen[abs] = true
-			unique = append(unique, abs)
-		}
-	}
-
+	filePath := args[0]
 	e := &extractor.PromptExtractor{}
-	for _, filePath := range unique {
-		var result *extractor.ExtractionResult
-		var err error
+	var result *extractor.ExtractionResult
+	var err error
 
-		ext := strings.ToLower(filepath.Ext(filePath))
-		switch ext {
-		case ".json":
-			result, err = e.ExtractJSON(filePath)
-		case ".png":
-			result, err = e.ExtractComfyUI(filePath)
-			if err == nil && len(result.PositivePrompts) == 0 {
-				result, err = e.ExtractParameters(filePath)
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".json":
+		result, err = e.ExtractJSON(filePath)
+	case ".png":
+		result, err = e.ExtractComfyUI(filePath, nil)
+		if err == nil && len(result.PositivePrompts) == 0 {
+			result, err = e.ExtractParameters(filePath, nil)
+		}
+	case ".txt":
+		result, err = e.ExtractText(filePath)
+	default:
+		fmt.Fprintf(os.Stderr, "Unsupported file extension: %s\n", ext)
+		os.Exit(1)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error processing %s: %v\n", filePath, err)
+		os.Exit(1)
+	}
+
+	if len(result.PositivePrompts) > 0 {
+		for _, p := range result.PositivePrompts {
+			if p.Title != "" && p.Title != "Untitled" {
+				fmt.Printf("[%s]\n", p.Title)
 			}
-		case ".txt":
-			result, err = e.ExtractText(filePath)
-		default:
-			continue
-		}
-
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error processing %s: %v\n", filePath, err)
-			continue
-		}
-
-		if len(result.PositivePrompts) > 0 {
-			fmt.Printf("=== %s ===\n", filepath.Base(filePath))
-			for _, p := range result.PositivePrompts {
-				if p.Title != "" && p.Title != "Untitled" {
-					fmt.Printf("[%s]\n", p.Title)
-				}
-				fmt.Println(strings.TrimSpace(p.Text))
+			fmt.Println(strings.TrimSpace(p.Text))
+			if len(result.PositivePrompts) > 1 {
 				fmt.Println(strings.Repeat("-", 40))
 			}
-			fmt.Println()
 		}
 	}
 }
