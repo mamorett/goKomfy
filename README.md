@@ -22,7 +22,7 @@ Ported from the original Python/PyQt6 application to Go, it offers superior perf
   - **Parameters**: Support for standard `parameters` metadata (A1111/Forge style).
 - 🖱️ **Enhanced Drag & Drop**:
   - Intuitive, high-visibility drop zone with interactive visual feedback (flashing confirm).
-  - Supports dropping single files, multiple files, or entire folders.
+  - Supports dropping a single PNG file or JSON workflow.
 - 📋 **Auto-Copy to Clipboard**:
   - Optional switch to automatically copy all extracted prompts as soon as they are processed.
 - 🖼️ **Smart Image Preview**:
@@ -67,7 +67,7 @@ make install-linux
 ### GUI Application (`gokomfy`)
 The main interface for most users. 
 - **Toggle Mode**: `Ctrl+E` or use the dropdown.
-- **Open Files**: `Ctrl+O` or Drag & Drop.
+- **Open File**: `Ctrl+O` or Drag & Drop.
 - **Aspect Ratio**: Automatically shown below the preview image.
 - **Auto-Copy**: Enable the checkbox to skip manual copying.
 
