@@ -64,8 +64,7 @@ type MainWindow struct {
 	promptScroll  *container.Scroll
 	summaryScroll *container.Scroll
 
-	copyAllBtn   *widget.Button
-	copyFirstBtn *widget.Button
+	copyBtn      *widget.Button
 	saveBtn      *widget.Button
 	clearBtn     *widget.Button
 	statusLabel  *widget.Label
@@ -169,15 +168,13 @@ func (mw *MainWindow) setupUI() {
 	mw.progressBar = widget.NewProgressBarInfinite()
 	mw.progressBar.Hide()
 
-	mw.copyAllBtn = widget.NewButtonWithIcon("Copy All", theme.ContentCopyIcon(), mw.copyAllPrompts)
-	mw.copyFirstBtn = widget.NewButtonWithIcon("Copy First", theme.ContentCopyIcon(), mw.copyFirstPrompt)
+	mw.copyBtn = widget.NewButtonWithIcon("Copy Prompt(s)", theme.ContentCopyIcon(), mw.copyPrompts)
 	mw.saveBtn = widget.NewButtonWithIcon("Save To File", theme.DocumentSaveIcon(), mw.saveToFile)
 	mw.clearBtn = widget.NewButtonWithIcon("Clear Results", theme.DeleteIcon(), mw.clearResults)
 
 	actions := container.NewHBox(
 		layout.NewSpacer(),
-		mw.copyAllBtn,
-		mw.copyFirstBtn,
+		mw.copyBtn,
 		mw.saveBtn,
 		mw.clearBtn,
 		layout.NewSpacer(),
@@ -252,8 +249,7 @@ func (mw *MainWindow) setupMenu() {
 	)
 
 	editMenu := fyne.NewMenu("Edit",
-		fyne.NewMenuItem("Copy All Prompts", mw.copyAllPrompts),
-		fyne.NewMenuItem("Copy First Prompt", mw.copyFirstPrompt),
+		fyne.NewMenuItem("Copy Prompt(s)", mw.copyPrompts),
 		fyne.NewMenuItem("Clear Results", mw.clearResults),
 	)
 
@@ -489,26 +485,19 @@ func (mw *MainWindow) onExtractionFinished(result *extractor.ExtractionResult) {
 	mw.statusLabel.SetText(fmt.Sprintf("Found %d prompts in %s", len(allTexts), result.FileInfo.Filename))
 
 	if mw.state.autoCopy && len(allTexts) > 0 {
-		mw.copyAllPrompts()
+		mw.copyPrompts()
 		mw.statusLabel.SetText(mw.statusLabel.Text + " [COPIED TO CLIPBOARD]")
 	}
 
 	mw.setUIBusy(false)
 }
 
-func (mw *MainWindow) copyAllPrompts() {
+func (mw *MainWindow) copyPrompts() {
 	if len(mw.state.promptTexts) == 0 {
 		return
 	}
 	text := strings.Join(mw.state.promptTexts, "\n\n")
 	clipboard.WriteAll(text)
-}
-
-func (mw *MainWindow) copyFirstPrompt() {
-	if len(mw.state.promptTexts) == 0 {
-		return
-	}
-	clipboard.WriteAll(mw.state.promptTexts[0])
 }
 
 func (mw *MainWindow) clearResults() {
@@ -547,12 +536,10 @@ func (mw *MainWindow) clearResults() {
 func (mw *MainWindow) updateButtonStates() {
 	hasResults := len(mw.state.promptTexts) > 0 && !mw.state.busy
 	if hasResults {
-		mw.copyAllBtn.Enable()
-		mw.copyFirstBtn.Enable()
+		mw.copyBtn.Enable()
 		mw.saveBtn.Enable()
 	} else {
-		mw.copyAllBtn.Disable()
-		mw.copyFirstBtn.Disable()
+		mw.copyBtn.Disable()
 		mw.saveBtn.Disable()
 	}
 
