@@ -5,13 +5,16 @@ import (
 	"context"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"io"
 	"log"
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -20,7 +23,6 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
@@ -41,6 +43,7 @@ type AppState struct {
 	mode          string // "ComfyUI" or "Parameters"
 	busy          bool
 	autoCopy      bool
+	cancel        context.CancelFunc
 }
 
 type MainWindow struct {
@@ -55,22 +58,28 @@ type MainWindow struct {
 	summaryEntry  *ReadOnlyEntry
 	progressBar   *widget.ProgressBarInfinite
 
-	dropZone     *DropZone
-	previewImg   *canvas.Image
-	previewLabel *widget.Label
-	previewCont  *fyne.Container
+	dropZone       *DropZone
+	previewImg     *canvas.Image
+	previewLabel   *widget.Label
+	previewCardBg  *canvas.Rectangle
+	previewCont    *fyne.Container
 	previewBoxCont *fyne.Container
 
 	promptScroll  *container.Scroll
 	summaryScroll *container.Scroll
+	tabs          *container.AppTabs
+	resultsStack  *fyne.Container
+	emptyState    *fyne.Container
 
-	copyBtn      *widget.Button
-	saveBtn      *widget.Button
-	clearBtn     *widget.Button
-	statusLabel  *widget.Label
+	copyBtn     *widget.Button
+	saveBtn     *widget.Button
+	clearBtn    *widget.Button
+	statusLabel *widget.Label
+	statusDot   *canvas.Circle
 }
 
 func NewMainWindow(a fyne.App) *MainWindow {
+	a.Settings().SetTheme(NewKomfyTheme())
 	mw := &MainWindow{
 		app: a,
 		state: AppState{
@@ -91,25 +100,26 @@ func (mw *MainWindow) setupUI() {
 	// 1. Header (Mode + Browse)
 	mw.modeSelect = widget.NewSelect([]string{"ComfyUI", "Parameters"}, func(s string) {
 		mw.state.mode = s
-		// Re-extract if we already have a file loaded
-		if mw.state.currentFile != "" && !mw.state.busy {
+		if mw.state.currentFile != "" && !mw.isBusy() {
 			mw.processFile(mw.state.currentFile)
 		}
 	})
 	mw.modeSelect.SetSelected(mw.state.mode)
 
-	mw.autoCopyCheck = widget.NewCheck("Auto-copy to Clipboard", func(b bool) {
+	mw.autoCopyCheck = widget.NewCheck("Auto-copy", func(b bool) {
 		mw.state.autoCopy = b
 	})
 
 	browseFilesBtn := widget.NewButtonWithIcon("Open File", theme.FileIcon(), func() {
 		mw.browseFiles()
 	})
+	browseFilesBtn.Importance = widget.LowImportance
 
 	header := container.NewHBox(
-		widget.NewLabelWithStyle("goKomfy", fyne.TextAlignLeading, fyne.TextStyle{Bold: true, Italic: true}),
+		widget.NewIcon(resourceLogoPng),
+		widget.NewLabelWithStyle("goKomfy", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		layout.NewSpacer(),
-		widget.NewLabel("Extraction Mode:"),
+		container.NewVBox(layout.NewSpacer(), widget.NewLabel("Mode:"), layout.NewSpacer()),
 		mw.modeSelect,
 		mw.autoCopyCheck,
 		widget.NewSeparator(),
@@ -124,8 +134,10 @@ func (mw *MainWindow) setupUI() {
 	mw.previewImg = canvas.NewImageFromImage(nil)
 	mw.previewImg.FillMode = canvas.ImageFillContain
 
-	// previewBox ensures the right side of the split has a stable size and doesn't jump
-	mw.previewBoxCont = container.NewGridWrap(fyne.NewSize(300, 300), mw.previewImg)
+	mw.previewCardBg = canvas.NewRectangle(color.RGBA{R: 0x3b, G: 0x42, B: 0x52, A: 0xff}) // nord1
+	mw.previewCardBg.CornerRadius = 8
+
+	mw.previewBoxCont = container.NewStack(mw.previewCardBg, mw.previewImg)
 
 	mw.previewLabel = widget.NewLabel("")
 	mw.previewLabel.Alignment = fyne.TextAlignCenter
@@ -139,7 +151,7 @@ func (mw *MainWindow) setupUI() {
 		mw.dropZone,
 		mw.previewCont,
 	)
-	topSplit.Offset = 0.6 // Initial balance
+	topSplit.Offset = 0.5
 
 	// Bottom part of the split: Results
 	mw.promptEntry = NewReadOnlyEntry()
@@ -152,25 +164,41 @@ func (mw *MainWindow) setupUI() {
 	mw.promptScroll = container.NewScroll(mw.promptEntry)
 	mw.summaryScroll = container.NewScroll(mw.summaryEntry)
 
-	tabs := container.NewAppTabs(
+	mw.tabs = container.NewAppTabs(
 		container.NewTabItemWithIcon("Extracted Prompts", theme.FileTextIcon(), mw.promptScroll),
 		container.NewTabItemWithIcon("Summary", theme.InfoIcon(), mw.summaryScroll),
 	)
 
+	// Empty State
+	emptyIcon := widget.NewIcon(theme.InfoIcon())
+	emptyLabel := widget.NewLabelWithStyle("No file loaded.\nDrop a PNG or JSON file to begin.", fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
+	mw.emptyState = container.NewCenter(container.NewVBox(
+		container.NewCenter(emptyIcon),
+		emptyLabel,
+	))
+
+	mw.resultsStack = container.NewStack(mw.tabs, mw.emptyState)
+	mw.tabs.Hide() // Hide tabs by default
+
 	// MAIN VSplit (Top Area vs Results)
 	mainSplit := container.NewVSplit(
 		topSplit,
-		tabs,
+		mw.resultsStack,
 	)
-	mainSplit.Offset = 0.4 // 40% top, 60% bottom
+	mainSplit.Offset = 0.45
 
 	// 3. Footer (Progress + Actions + Status)
 	mw.progressBar = widget.NewProgressBarInfinite()
 	mw.progressBar.Hide()
 
 	mw.copyBtn = widget.NewButtonWithIcon("Copy Prompt(s)", theme.ContentCopyIcon(), mw.copyPrompts)
+	mw.copyBtn.Importance = widget.HighImportance
+
 	mw.saveBtn = widget.NewButtonWithIcon("Save To File", theme.DocumentSaveIcon(), mw.saveToFile)
-	mw.clearBtn = widget.NewButtonWithIcon("Clear Results", theme.DeleteIcon(), mw.clearResults)
+	mw.saveBtn.Importance = widget.MediumImportance
+
+	mw.clearBtn = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), mw.clearResults)
+	mw.clearBtn.Importance = widget.LowImportance
 
 	actions := container.NewHBox(
 		layout.NewSpacer(),
@@ -180,13 +208,22 @@ func (mw *MainWindow) setupUI() {
 		layout.NewSpacer(),
 	)
 
+	mw.statusDot = canvas.NewCircle(theme.SuccessColor())
+	mw.statusDot.Resize(fyne.NewSize(8, 8))
+	mw.statusDot.Hide() // We'll show it when we have a state
+
 	mw.statusLabel = widget.NewLabel("Ready")
-	mw.statusLabel.TextStyle = fyne.TextStyle{Italic: true}
+	mw.statusLabel.TextStyle = fyne.TextStyle{Monospace: true}
+
+	statusIndicator := container.NewHBox(
+		container.NewCenter(mw.statusDot),
+		mw.statusLabel,
+	)
 
 	footer := container.NewVBox(
 		mw.progressBar,
 		container.NewPadded(actions),
-		container.NewHBox(layout.NewSpacer(), mw.statusLabel),
+		container.NewHBox(layout.NewSpacer(), statusIndicator),
 	)
 
 	// Set window level drop as well
@@ -203,40 +240,10 @@ func (mw *MainWindow) setupUI() {
 		footer,
 		nil,
 		nil,
-		mainSplit,
+		container.NewPadded(mainSplit),
 	))
 
 	mw.updateButtonStates()
-}
-
-func (mw *MainWindow) setupShortcuts() {
-	mw.window.Canvas().AddShortcut(&desktop.CustomShortcut{
-		KeyName:  fyne.KeyO,
-		Modifier: fyne.KeyModifierControl,
-	}, func(s fyne.Shortcut) {
-		mw.browseFiles()
-	})
-
-	mw.window.Canvas().AddShortcut(&desktop.CustomShortcut{
-		KeyName:  fyne.KeyE,
-		Modifier: fyne.KeyModifierControl,
-	}, func(s fyne.Shortcut) {
-		mw.toggleMode()
-	})
-
-	mw.window.Canvas().AddShortcut(&desktop.CustomShortcut{
-		KeyName:  fyne.KeyS,
-		Modifier: fyne.KeyModifierControl,
-	}, func(s fyne.Shortcut) {
-		mw.saveToFile()
-	})
-
-	mw.window.Canvas().AddShortcut(&desktop.CustomShortcut{
-		KeyName:  fyne.KeyL,
-		Modifier: fyne.KeyModifierControl,
-	}, func(s fyne.Shortcut) {
-		mw.clearResults()
-	})
 }
 
 func (mw *MainWindow) setupMenu() {
@@ -254,6 +261,9 @@ func (mw *MainWindow) setupMenu() {
 	)
 
 	helpMenu := fyne.NewMenu("Help",
+		fyne.NewMenuItem("Shortcuts", func() {
+			showShortcuts(mw.window)
+		}),
 		fyne.NewMenuItem("About", func() {
 			showAbout(mw.window)
 		}),
@@ -308,23 +318,39 @@ func (mw *MainWindow) setUIBusy(busy bool) {
 
 	if busy {
 		mw.progressBar.Show()
+		mw.statusDot.FillColor = theme.WarningColor()
+		mw.statusDot.Show()
 		mw.statusLabel.SetText("Processing...")
 	} else {
 		mw.progressBar.Hide()
 	}
+	mw.statusDot.Refresh()
 	mw.updateButtonStates()
 }
 
-func (mw *MainWindow) processFile(file string) {
-	if mw.isBusy() {
-		return
+func (mw *MainWindow) releasePreviewImage() {
+	if mw.previewImg != nil {
+		mw.previewImg.Image = nil
+		mw.previewImg.Refresh()
 	}
+}
+
+func (mw *MainWindow) processFile(file string) {
+	// Cancel any existing processing
+	mw.state.mu.Lock()
+	if mw.state.cancel != nil {
+		mw.state.cancel()
+	}
+	// Use a background context that we can cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	mw.state.cancel = cancel
+	mw.state.mu.Unlock()
+
 	mw.setUIBusy(true)
 	mw.state.currentFile = file
 
 	// Release previous preview image reference
-	mw.previewImg.Image = nil
-	mw.previewImg.Refresh()
+	mw.releasePreviewImage()
 
 	// Immediately clear old state and hide preview
 	mw.promptEntry.SetText("")
@@ -332,15 +358,19 @@ func (mw *MainWindow) processFile(file string) {
 	mw.previewCont.Hide()
 
 	currentMode := mw.state.mode
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 
-	// Add a timeout-based safety net for the busy flag
+	// Safety net goroutine: integrated with the same context
 	go func() {
+		timer := time.NewTimer(130 * time.Second)
+		defer timer.Stop()
 		select {
 		case <-ctx.Done():
-		case <-time.After(130 * time.Second):
+			// Normal cancellation or completion
+			return
+		case <-timer.C:
+			// If we hit 130s and are still busy, something is likely stuck
 			if mw.isBusy() {
-				log.Printf("[WARN] Busy flag safety net triggered after 130s")
+				log.Printf("[WARN] Processing safety net triggered after 130s")
 				fyne.Do(func() {
 					mw.setUIBusy(false)
 					mw.statusLabel.SetText("Processing timed out - recovered")
@@ -350,17 +380,17 @@ func (mw *MainWindow) processFile(file string) {
 	}()
 
 	go func() {
-		defer cancel()
-		finished := false
+		// Ensure we cancel on exit if not already done, but we usually want to 
+		// keep it until setUIBusy(false) is called or next file is dropped.
+		// However, once this goroutine finishes, we should clear the cancel func
+		// if it's still ours.
 		defer func() {
-			if !finished {
-				if r := recover(); r != nil {
-					log.Printf("[PANIC] %v", r)
-					fyne.Do(func() {
-						mw.setUIBusy(false)
-						dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
-					})
-				}
+			if r := recover(); r != nil {
+				log.Printf("[PANIC] %v", r)
+				fyne.Do(func() {
+					mw.setUIBusy(false)
+					dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
+				})
 			}
 		}()
 
@@ -370,9 +400,19 @@ func (mw *MainWindow) processFile(file string) {
 			select {
 			case <-ctx.Done():
 				log.Printf("[DEBUG] Thumbnail loading cancelled")
-			case res := <-getThumbnailAsync(ctx, file, 400):
-				thumbImg, thumbW, thumbH = res.img, res.w, res.h
+				return
+			case res, ok := <-getThumbnailAsync(ctx, file, 400):
+				if ok {
+					thumbImg, thumbW, thumbH = res.img, res.w, res.h
+				}
 			}
+		}
+
+		// Check if we were cancelled during thumb loading
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
 
 		// Run extraction
@@ -417,6 +457,13 @@ func (mw *MainWindow) processFile(file string) {
 			}
 		}
 
+		// Final check for cancellation before UI updates
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
 		// Post all UI updates back on the main thread
 		fyne.Do(func() {
 			if thumbImg != nil {
@@ -434,7 +481,6 @@ func (mw *MainWindow) processFile(file string) {
 				mw.previewCont.Show()
 			}
 			mw.onExtractionFinished(result)
-			finished = true
 		})
 	}()
 }
@@ -484,12 +530,25 @@ func (mw *MainWindow) onExtractionFinished(result *extractor.ExtractionResult) {
 	mw.summaryEntry.SetText(strings.Join(summaryLines, "\n"))
 	mw.statusLabel.SetText(fmt.Sprintf("Found %d prompts in %s", len(allTexts), result.FileInfo.Filename))
 
+	mw.tabs.Show()
+	mw.emptyState.Hide()
+	mw.resultsStack.Refresh()
+
+	if result.Error != "" {
+		mw.statusDot.FillColor = theme.ErrorColor()
+	} else {
+		mw.statusDot.FillColor = theme.SuccessColor()
+	}
+	mw.statusDot.Show()
+	mw.statusDot.Refresh()
+
 	if mw.state.autoCopy && len(allTexts) > 0 {
 		mw.copyPrompts()
 		mw.statusLabel.SetText(mw.statusLabel.Text + " [COPIED TO CLIPBOARD]")
 	}
 
 	mw.setUIBusy(false)
+	runtime.GC()
 }
 
 func (mw *MainWindow) copyPrompts() {
@@ -505,6 +564,9 @@ func (mw *MainWindow) clearResults() {
 	mw.state.currentFile = ""
 	mw.state.currentResult = nil
 	mw.state.promptTexts = nil
+	if mw.state.cancel != nil {
+		mw.state.cancel()
+	}
 	mw.state.mu.Unlock()
 
 	// Recreate text widgets to fully release internal state
@@ -522,6 +584,7 @@ func (mw *MainWindow) clearResults() {
 	mw.summaryScroll.Refresh()
 
 	// Reset preview
+	mw.releasePreviewImage()
 	newImg := canvas.NewImageFromImage(nil)
 	newImg.FillMode = canvas.ImageFillContain
 	mw.previewBoxCont.Objects[0] = newImg
@@ -529,8 +592,15 @@ func (mw *MainWindow) clearResults() {
 	mw.previewImg = newImg
 	mw.previewCont.Hide()
 
+	mw.tabs.Hide()
+	mw.emptyState.Show()
+	mw.resultsStack.Refresh()
+
 	mw.statusLabel.SetText("Ready")
+	mw.statusDot.Hide()
+	mw.statusDot.Refresh()
 	mw.updateButtonStates()
+	runtime.GC()
 }
 
 func (mw *MainWindow) updateButtonStates() {
@@ -599,8 +669,11 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	}
 	defer f.Close()
 
+	// Use LimitReader to prevent decompression bombs or massive file reads (200MB)
+	lr := io.LimitReader(f, 200*1024*1024)
+
 	// 3.3. Use image.DecodeConfig before full decode
-	config, _, err := image.DecodeConfig(f)
+	config, _, err := image.DecodeConfig(lr)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -610,13 +683,15 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	if err != nil {
 		return nil, 0, 0, err
 	}
+	// Re-wrap LimitReader after seek
+	lr = io.LimitReader(f, 200*1024*1024)
 
 	// Dimension guardrail
-	if config.Width > 8192 || config.Height > 8192 {
-		return nil, config.Width, config.Height, fmt.Errorf("image too large (%dx%d)", config.Width, config.Height)
+	if config.Width > 12000 || config.Height > 12000 {
+		return nil, config.Width, config.Height, fmt.Errorf("image dimensions too large (%dx%d)", config.Width, config.Height)
 	}
 
-	img, _, err := image.Decode(f)
+	img, _, err := image.Decode(lr)
 	if err != nil {
 		return nil, 0, 0, err
 	}
@@ -636,6 +711,7 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 
 	// Explicitly release original to free memory faster
 	img = nil
+	runtime.GC()
 
 	return dst, origW, origH, nil
 }

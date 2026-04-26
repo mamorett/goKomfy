@@ -7,13 +7,12 @@ import (
 
 func showAbout(win fyne.Window) {
 	content := `ComfyUI Prompt Extractor
-Version 4.0 (Go Edition)
+Version 4.1 (Stability Patch)
 
 A tool to extract positive prompts from ComfyUI-generated PNG files.
 
 Features:
 • Dual extraction modes (ComfyUI / Parameters)
-• Batch processing support
 • Drag & drop interface
 • Image thumbnails
 • Export to text file
