@@ -13,14 +13,16 @@ import (
 
 type DropZone struct {
 	widget.BaseWidget
-	label     *widget.Label
-	hovered   bool
-	blinking  bool
+	label    *widget.Label
+	icon     *widget.Icon
+	hovered  bool
+	blinking bool
 }
 
 func NewDropZone(text string) *DropZone {
 	d := &DropZone{
 		label: widget.NewLabel(text),
+		icon:  widget.NewIcon(theme.UploadIcon()),
 	}
 	d.label.Alignment = fyne.TextAlignCenter
 	d.label.Wrapping = fyne.TextWrapWord
@@ -30,8 +32,8 @@ func NewDropZone(text string) *DropZone {
 
 func (d *DropZone) CreateRenderer() fyne.WidgetRenderer {
 	bg := canvas.NewRectangle(theme.InputBackgroundColor())
-	
-	// Use a slightly visible border
+	bg.CornerRadius = 12
+
 	border := canvas.NewRectangle(color.Transparent)
 	border.StrokeWidth = 2
 	border.StrokeColor = theme.DisabledColor()
@@ -40,7 +42,7 @@ func (d *DropZone) CreateRenderer() fyne.WidgetRenderer {
 		dropZone: d,
 		bg:       bg,
 		border:   border,
-		objects:  []fyne.CanvasObject{bg, border, d.label},
+		objects:  []fyne.CanvasObject{bg, border, d.icon, d.label},
 	}
 }
 
@@ -54,10 +56,14 @@ type dropZoneRenderer struct {
 func (r *dropZoneRenderer) Layout(size fyne.Size) {
 	r.bg.Resize(size)
 	r.border.Resize(size)
-	// Center the label with some padding
-	padding := fyne.NewSize(20, 20)
-	r.dropZone.label.Resize(size.Subtract(padding))
-	r.dropZone.label.Move(fyne.NewPos(10, 10))
+
+	iconSize := float32(48)
+	r.dropZone.icon.Resize(fyne.NewSize(iconSize, iconSize))
+	r.dropZone.icon.Move(fyne.NewPos((size.Width-iconSize)/2, (size.Height-iconSize)/2-20))
+
+	labelWidth := size.Width - 40
+	r.dropZone.label.Resize(fyne.NewSize(labelWidth, 40))
+	r.dropZone.label.Move(fyne.NewPos(20, (size.Height-iconSize)/2+iconSize-10))
 }
 
 func (r *dropZoneRenderer) MinSize() fyne.Size {
@@ -71,16 +77,19 @@ func (r *dropZoneRenderer) Refresh() {
 		r.dropZone.label.TextStyle.Bold = true
 	} else if r.dropZone.hovered {
 		r.border.StrokeColor = theme.PrimaryColor()
+		r.border.StrokeWidth = 3
 		r.bg.FillColor = theme.HoverColor()
 		r.dropZone.label.TextStyle.Bold = false
 	} else {
-		r.border.StrokeColor = theme.DisabledColor()
+		r.border.StrokeColor = theme.SeparatorColor()
+		r.border.StrokeWidth = 2
 		r.bg.FillColor = theme.InputBackgroundColor()
 		r.dropZone.label.TextStyle.Bold = false
 	}
 	r.bg.Refresh()
 	r.border.Refresh()
 	r.dropZone.label.Refresh()
+	r.dropZone.icon.Refresh()
 }
 
 func (r *dropZoneRenderer) Objects() []fyne.CanvasObject {
