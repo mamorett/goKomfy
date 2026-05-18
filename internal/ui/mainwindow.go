@@ -67,6 +67,7 @@ type MainWindow struct {
 	copyBtn      *widget.Button
 	saveBtn      *widget.Button
 	clearBtn     *widget.Button
+	aboutBtn     *widget.Button
 	statusLabel  *widget.Label
 }
 
@@ -171,6 +172,9 @@ func (mw *MainWindow) setupUI() {
 	mw.copyBtn = widget.NewButtonWithIcon("Copy Prompt(s)", theme.ContentCopyIcon(), mw.copyPrompts)
 	mw.saveBtn = widget.NewButtonWithIcon("Save To File", theme.DocumentSaveIcon(), mw.saveToFile)
 	mw.clearBtn = widget.NewButtonWithIcon("Clear Results", theme.DeleteIcon(), mw.clearResults)
+	mw.aboutBtn = widget.NewButtonWithIcon("", theme.InfoIcon(), func() {
+		showAbout(mw.window)
+	})
 
 	actions := container.NewHBox(
 		layout.NewSpacer(),
@@ -180,13 +184,21 @@ func (mw *MainWindow) setupUI() {
 		layout.NewSpacer(),
 	)
 
+	versionLabel := widget.NewLabel("v" + AppVersion)
+	versionLabel.TextStyle = fyne.TextStyle{Italic: true}
+
 	mw.statusLabel = widget.NewLabel("Ready")
 	mw.statusLabel.TextStyle = fyne.TextStyle{Italic: true}
 
 	footer := container.NewVBox(
 		mw.progressBar,
 		container.NewPadded(actions),
-		container.NewHBox(layout.NewSpacer(), mw.statusLabel),
+		container.NewHBox(
+			mw.aboutBtn,
+			versionLabel,
+			layout.NewSpacer(),
+			mw.statusLabel,
+		),
 	)
 
 	// Set window level drop as well
@@ -320,7 +332,9 @@ func (mw *MainWindow) processFile(file string) {
 		return
 	}
 	mw.setUIBusy(true)
+	mw.state.mu.Lock()
 	mw.state.currentFile = file
+	mw.state.mu.Unlock()
 
 	// Release previous preview image reference
 	mw.previewImg.Image = nil
@@ -332,47 +346,47 @@ func (mw *MainWindow) processFile(file string) {
 	mw.previewCont.Hide()
 
 	currentMode := mw.state.mode
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	done := make(chan struct{})
 
-	// Add a timeout-based safety net for the busy flag
+	// Watchdog: resets the busy flag if extraction hangs or times out.
+	// Runs independently of fyne.Do so that even if Fyne's event loop is
+	// stuck the busy flag gets cleared and the app stays usable.
 	go func() {
 		select {
+		case <-done:
 		case <-ctx.Done():
-		case <-time.After(130 * time.Second):
-			if mw.isBusy() {
-				log.Printf("[WARN] Busy flag safety net triggered after 130s")
-				fyne.Do(func() {
-					mw.setUIBusy(false)
-					mw.statusLabel.SetText("Processing timed out - recovered")
-				})
-			}
+			log.Printf("[WARN] Extraction timed out after 30s — forcing busy flag reset")
+			mw.state.mu.Lock()
+			mw.state.busy = false
+			mw.state.mu.Unlock()
 		}
+		cancel()
 	}()
 
 	go func() {
-		defer cancel()
-		finished := false
+		defer close(done)
 		defer func() {
-			if !finished {
-				if r := recover(); r != nil {
-					log.Printf("[PANIC] %v", r)
-					fyne.Do(func() {
-						mw.setUIBusy(false)
-						dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
-					})
-				}
+			if r := recover(); r != nil {
+				log.Printf("[PANIC] %v", r)
+				fyne.Do(func() {
+					mw.setUIBusy(false)
+					dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
+				})
 			}
 		}()
 
 		var thumbImg image.Image
 		var thumbW, thumbH int
 		if strings.ToLower(filepath.Ext(file)) == ".png" {
+			thumbCtx, thumbCancel := context.WithTimeout(ctx, 5*time.Second)
 			select {
-			case <-ctx.Done():
-				log.Printf("[DEBUG] Thumbnail loading cancelled")
-			case res := <-getThumbnailAsync(ctx, file, 400):
+			case <-thumbCtx.Done():
+				log.Printf("[DEBUG] Thumbnail loading cancelled or timed out")
+			case res := <-getThumbnailAsync(thumbCtx, file, 400):
 				thumbImg, thumbW, thumbH = res.img, res.w, res.h
 			}
+			thumbCancel()
 		}
 
 		// Run extraction
@@ -420,21 +434,22 @@ func (mw *MainWindow) processFile(file string) {
 		// Post all UI updates back on the main thread
 		fyne.Do(func() {
 			if thumbImg != nil {
-				// Create a fresh canvas.Image to force Fyne to release old textures
+				// Release old GPU texture before swapping in a new image
+				if oldImg, ok := mw.previewBoxCont.Objects[0].(*canvas.Image); ok {
+					oldImg.Image = nil
+					oldImg.Refresh()
+				}
 				newImg := canvas.NewImageFromImage(thumbImg)
 				newImg.FillMode = canvas.ImageFillContain
-
-				// Replace the image in the preview container
 				mw.previewBoxCont.Objects[0] = newImg
 				mw.previewBoxCont.Refresh()
-				mw.previewImg = newImg // Update the reference
+				mw.previewImg = newImg
 
 				ratioStr := calculateAspectRatio(thumbW, thumbH)
 				mw.previewLabel.SetText(fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(file)))
 				mw.previewCont.Show()
 			}
 			mw.onExtractionFinished(result)
-			finished = true
 		})
 	}()
 }
@@ -502,6 +517,7 @@ func (mw *MainWindow) copyPrompts() {
 
 func (mw *MainWindow) clearResults() {
 	mw.state.mu.Lock()
+	mw.state.busy = false // Force-reset stuck busy flag (emergency recovery)
 	mw.state.currentFile = ""
 	mw.state.currentResult = nil
 	mw.state.promptTexts = nil
@@ -543,11 +559,8 @@ func (mw *MainWindow) updateButtonStates() {
 		mw.saveBtn.Disable()
 	}
 
-	if mw.state.busy || (mw.state.currentFile == "") {
-		mw.clearBtn.Disable()
-	} else {
-		mw.clearBtn.Enable()
-	}
+	// Clear button is always enabled as an emergency recovery path
+	mw.clearBtn.Enable()
 }
 
 func (mw *MainWindow) saveToFile() {
@@ -612,7 +625,7 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	}
 
 	// Dimension guardrail
-	if config.Width > 8192 || config.Height > 8192 {
+	if config.Width > 4096 || config.Height > 4096 {
 		return nil, config.Width, config.Height, fmt.Errorf("image too large (%dx%d)", config.Width, config.Height)
 	}
 

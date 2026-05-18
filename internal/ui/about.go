@@ -1,13 +1,15 @@
 package ui
 
 import (
+	"fmt"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
 )
 
 func showAbout(win fyne.Window) {
-	content := `ComfyUI Prompt Extractor
-Version 4.0 (Go Edition)
+	content := fmt.Sprintf(`ComfyUI Prompt Extractor
+Version %s (Go Edition)
 
 A tool to extract positive prompts from ComfyUI-generated PNG files.
 
@@ -23,6 +25,7 @@ Keyboard Shortcuts:
 • Ctrl+E: Toggle extraction mode
 • Ctrl+C: Copy all prompts
 • Ctrl+S: Save to file
-• Ctrl+L: Clear results`
+• Ctrl+L: Clear results`, AppVersion)
+
 	dialog.ShowInformation("About", content, win)
 }
