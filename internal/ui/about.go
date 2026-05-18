@@ -8,13 +8,8 @@ import (
 )
 
 func showAbout(win fyne.Window) {
-<<<<<<< HEAD
 	content := fmt.Sprintf(`ComfyUI Prompt Extractor
-Version %s (Go Edition)
-=======
-	content := `ComfyUI Prompt Extractor
-Version 4.1 (Stability Patch)
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
+Version %s (Stability Patch)
 
 A tool to extract positive prompts from ComfyUI-generated PNG files.
 

@@ -71,19 +71,12 @@ type MainWindow struct {
 	resultsStack  *fyne.Container
 	emptyState    *fyne.Container
 
-<<<<<<< HEAD
-	copyBtn      *widget.Button
-	saveBtn      *widget.Button
-	clearBtn     *widget.Button
-	aboutBtn     *widget.Button
-	statusLabel  *widget.Label
-=======
 	copyBtn     *widget.Button
 	saveBtn     *widget.Button
 	clearBtn    *widget.Button
+	aboutBtn    *widget.Button
 	statusLabel *widget.Label
 	statusDot   *canvas.Circle
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
 }
 
 func NewMainWindow(a fyne.App) *MainWindow {
@@ -203,17 +196,14 @@ func (mw *MainWindow) setupUI() {
 	mw.copyBtn.Importance = widget.HighImportance
 
 	mw.saveBtn = widget.NewButtonWithIcon("Save To File", theme.DocumentSaveIcon(), mw.saveToFile)
-<<<<<<< HEAD
-	mw.clearBtn = widget.NewButtonWithIcon("Clear Results", theme.DeleteIcon(), mw.clearResults)
-	mw.aboutBtn = widget.NewButtonWithIcon("", theme.InfoIcon(), func() {
-		showAbout(mw.window)
-	})
-=======
 	mw.saveBtn.Importance = widget.MediumImportance
 
 	mw.clearBtn = widget.NewButtonWithIcon("Clear", theme.DeleteIcon(), mw.clearResults)
 	mw.clearBtn.Importance = widget.LowImportance
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
+
+	mw.aboutBtn = widget.NewButtonWithIcon("", theme.InfoIcon(), func() {
+		showAbout(mw.window)
+	})
 
 	actions := container.NewHBox(
 		layout.NewSpacer(),
@@ -223,14 +213,12 @@ func (mw *MainWindow) setupUI() {
 		layout.NewSpacer(),
 	)
 
-<<<<<<< HEAD
 	versionLabel := widget.NewLabel("v" + AppVersion)
 	versionLabel.TextStyle = fyne.TextStyle{Italic: true}
-=======
+
 	mw.statusDot = canvas.NewCircle(theme.SuccessColor())
 	mw.statusDot.Resize(fyne.NewSize(8, 8))
 	mw.statusDot.Hide() // We'll show it when we have a state
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
 
 	mw.statusLabel = widget.NewLabel("Ready")
 	mw.statusLabel.TextStyle = fyne.TextStyle{Monospace: true}
@@ -243,16 +231,12 @@ func (mw *MainWindow) setupUI() {
 	footer := container.NewVBox(
 		mw.progressBar,
 		container.NewPadded(actions),
-<<<<<<< HEAD
 		container.NewHBox(
 			mw.aboutBtn,
 			versionLabel,
 			layout.NewSpacer(),
-			mw.statusLabel,
+			statusIndicator,
 		),
-=======
-		container.NewHBox(layout.NewSpacer(), statusIndicator),
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
 	)
 
 	// Set window level drop as well
@@ -389,54 +373,29 @@ func (mw *MainWindow) processFile(file string) {
 	mw.previewCont.Hide()
 
 	currentMode := mw.state.mode
-<<<<<<< HEAD
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	done := make(chan struct{})
 
-	// Watchdog: resets the busy flag if extraction hangs or times out.
-	// Runs independently of fyne.Do so that even if Fyne's event loop is
-	// stuck the busy flag gets cleared and the app stays usable.
-=======
-
-	// Safety net goroutine: integrated with the same context
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
+	// Safety net goroutine: resets busy flag directly if extraction hangs.
+	// Does NOT use fyne.Do — works even if Fyne's event loop is stuck.
 	go func() {
-		timer := time.NewTimer(130 * time.Second)
+		timer := time.NewTimer(30 * time.Second)
 		defer timer.Stop()
 		select {
 		case <-done:
 		case <-ctx.Done():
-<<<<<<< HEAD
-			log.Printf("[WARN] Extraction timed out after 30s — forcing busy flag reset")
-			mw.state.mu.Lock()
-			mw.state.busy = false
-			mw.state.mu.Unlock()
-=======
-			// Normal cancellation or completion
 			return
 		case <-timer.C:
-			// If we hit 130s and are still busy, something is likely stuck
 			if mw.isBusy() {
-				log.Printf("[WARN] Processing safety net triggered after 130s")
-				fyne.Do(func() {
-					mw.setUIBusy(false)
-					mw.statusLabel.SetText("Processing timed out - recovered")
-				})
+				log.Printf("[WARN] Processing safety net triggered after 30s")
+				mw.state.mu.Lock()
+				mw.state.busy = false
+				mw.state.mu.Unlock()
 			}
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
 		}
-		cancel()
 	}()
 
 	go func() {
-<<<<<<< HEAD
 		defer close(done)
-=======
-		// Ensure we cancel on exit if not already done, but we usually want to 
-		// keep it until setUIBusy(false) is called or next file is dropped.
-		// However, once this goroutine finishes, we should clear the cancel func
-		// if it's still ours.
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[PANIC] %v", r)
@@ -450,22 +409,21 @@ func (mw *MainWindow) processFile(file string) {
 		var thumbImg image.Image
 		var thumbW, thumbH int
 		if strings.ToLower(filepath.Ext(file)) == ".png" {
+			// Check if we were cancelled before thumb loading
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+
 			thumbCtx, thumbCancel := context.WithTimeout(ctx, 5*time.Second)
 			select {
-<<<<<<< HEAD
 			case <-thumbCtx.Done():
 				log.Printf("[DEBUG] Thumbnail loading cancelled or timed out")
-			case res := <-getThumbnailAsync(thumbCtx, file, 400):
-				thumbImg, thumbW, thumbH = res.img, res.w, res.h
-=======
-			case <-ctx.Done():
-				log.Printf("[DEBUG] Thumbnail loading cancelled")
-				return
-			case res, ok := <-getThumbnailAsync(ctx, file, 400):
+			case res, ok := <-getThumbnailAsync(thumbCtx, file, 400):
 				if ok {
 					thumbImg, thumbW, thumbH = res.img, res.w, res.h
 				}
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
 			}
 			thumbCancel()
 		}
@@ -530,13 +488,13 @@ func (mw *MainWindow) processFile(file string) {
 		fyne.Do(func() {
 			if thumbImg != nil {
 				// Release old GPU texture before swapping in a new image
-				if oldImg, ok := mw.previewBoxCont.Objects[0].(*canvas.Image); ok {
+				if oldImg, ok := mw.previewBoxCont.Objects[1].(*canvas.Image); ok {
 					oldImg.Image = nil
 					oldImg.Refresh()
 				}
 				newImg := canvas.NewImageFromImage(thumbImg)
 				newImg.FillMode = canvas.ImageFillContain
-				mw.previewBoxCont.Objects[0] = newImg
+				mw.previewBoxCont.Objects[1] = newImg // index 1 because index 0 is the background rectangle
 				mw.previewBoxCont.Refresh()
 				mw.previewImg = newImg
 
@@ -652,7 +610,7 @@ func (mw *MainWindow) clearResults() {
 	mw.releasePreviewImage()
 	newImg := canvas.NewImageFromImage(nil)
 	newImg.FillMode = canvas.ImageFillContain
-	mw.previewBoxCont.Objects[0] = newImg
+	mw.previewBoxCont.Objects[1] = newImg
 	mw.previewBoxCont.Refresh()
 	mw.previewImg = newImg
 	mw.previewCont.Hide()
@@ -749,13 +707,8 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	lr = io.LimitReader(f, 200*1024*1024)
 
 	// Dimension guardrail
-<<<<<<< HEAD
-	if config.Width > 4096 || config.Height > 4096 {
-		return nil, config.Width, config.Height, fmt.Errorf("image too large (%dx%d)", config.Width, config.Height)
-=======
 	if config.Width > 12000 || config.Height > 12000 {
 		return nil, config.Width, config.Height, fmt.Errorf("image dimensions too large (%dx%d)", config.Width, config.Height)
->>>>>>> b68f26cc489181a6f90bb5aadff1a58e059705ba
 	}
 
 	img, _, err := image.Decode(lr)
@@ -856,4 +809,3 @@ func getThumbnailAsync(ctx context.Context, filePath string, maxSize int) <-chan
 	}()
 	return ch
 }
-

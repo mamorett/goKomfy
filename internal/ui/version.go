@@ -1,3 +1,3 @@
 package ui
 
-const AppVersion = "4.0.0"
+const AppVersion = "4.1.0"
