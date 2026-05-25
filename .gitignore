@@ -36,3 +36,4 @@ plans/
 komfy
 komfy-cli
 cmd/komfy/bundled.go
+.antigravitycli

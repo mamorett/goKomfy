@@ -58,8 +58,8 @@ cd goKomfy
 make
 
 # 3. Install (Linux Only)
-# Adds binaries to ~/.local/bin and creates a desktop entry
-make install-linux
+# Adds binaries to ~/bin, installs desktop entry and icons
+make install
 ```
 
 ## 📖 Usage

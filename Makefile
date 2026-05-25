@@ -19,7 +19,7 @@ ICON_SRC    := $(CMD_KOMFY)/$(ICON_NAME)
 FYNE        := $(HOME)/go/bin/fyne
 
 # Install paths (Linux)
-INSTALL_BIN  := $(HOME)/.local/bin
+INSTALL_BIN  := $(HOME)/bin
 INSTALL_APPS := $(HOME)/.local/share/applications
 INSTALL_ICON := $(HOME)/.local/share/icons/hicolor
 
@@ -33,7 +33,7 @@ OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
 # Phony targets
 # ─────────────────────────────────────────────────────────────────────────────
 
-.PHONY: all build bundle-icon install-linux clean test
+.PHONY: all build bundle-icon install-linux install clean test
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Default target
@@ -75,10 +75,12 @@ else
 endif
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Install (Linux only)
+# Install
 # ─────────────────────────────────────────────────────────────────────────────
 
-install-linux:
+install: install-linux
+
+install-linux: build
 ifneq ($(OS),linux)
 	$(error install-linux is only supported on Linux)
 endif
