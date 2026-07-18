@@ -14,7 +14,6 @@ import (
 	"math"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -100,15 +99,16 @@ func NewMainWindow(a fyne.App) *MainWindow {
 func (mw *MainWindow) setupUI() {
 	// 1. Header (Mode + Browse)
 	mw.modeSelect = widget.NewSelect([]string{"ComfyUI", "Parameters"}, func(s string) {
-		mw.state.mode = s
-		if mw.state.currentFile != "" && !mw.isBusy() {
-			mw.processFile(mw.state.currentFile)
+		mw.setMode(s)
+		curFile := mw.getCurrentFile()
+		if curFile != "" && !mw.isBusy() {
+			mw.processFile(curFile)
 		}
 	})
-	mw.modeSelect.SetSelected(mw.state.mode)
+	mw.modeSelect.SetSelected(mw.getMode())
 
 	mw.autoCopyCheck = widget.NewCheck("Auto-copy", func(b bool) {
-		mw.state.autoCopy = b
+		mw.setAutoCopy(b)
 	})
 
 	browseFilesBtn := widget.NewButtonWithIcon("Open File", theme.FileIcon(), func() {
@@ -143,9 +143,9 @@ func (mw *MainWindow) setupUI() {
 	mw.previewLabel = widget.NewLabel("")
 	mw.previewLabel.Alignment = fyne.TextAlignCenter
 	mw.previewLabel.TextStyle = fyne.TextStyle{Monospace: true}
+	mw.previewLabel.Truncation = fyne.TextTruncateEllipsis
 
 	mw.previewCont = container.NewBorder(nil, mw.previewLabel, nil, nil, mw.previewBoxCont)
-	mw.previewCont.Hide()
 
 	// Use an HSplit for DropZone | Preview
 	topSplit := container.NewHSplit(
@@ -286,7 +286,7 @@ func (mw *MainWindow) setupMenu() {
 }
 
 func (mw *MainWindow) toggleMode() {
-	if mw.state.mode == "ComfyUI" {
+	if mw.getMode() == "ComfyUI" {
 		mw.modeSelect.SetSelected("Parameters")
 	} else {
 		mw.modeSelect.SetSelected("ComfyUI")
@@ -310,24 +310,130 @@ func (mw *MainWindow) isBusy() bool {
 	return mw.state.busy
 }
 
-func (mw *MainWindow) loadFile(path string) {
-	if mw.isBusy() {
-		mw.statusLabel.SetText("Processing in progress — please wait...")
-		return
-	}
+func (mw *MainWindow) setBusy(busy bool) {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	mw.state.busy = busy
+}
 
+func (mw *MainWindow) getMode() string {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	return mw.state.mode
+}
+
+func (mw *MainWindow) setMode(mode string) {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	mw.state.mode = mode
+}
+
+func (mw *MainWindow) getAutoCopy() bool {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	return mw.state.autoCopy
+}
+
+func (mw *MainWindow) setAutoCopy(autoCopy bool) {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	mw.state.autoCopy = autoCopy
+}
+
+func (mw *MainWindow) setCurrentFile(file string) {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	mw.state.currentFile = file
+}
+
+func (mw *MainWindow) getCurrentFile() string {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	return mw.state.currentFile
+}
+
+func (mw *MainWindow) setCurrent(result *extractor.ExtractionResult, promptTexts []string) {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	mw.state.currentResult = result
+	mw.state.promptTexts = promptTexts
+}
+
+func (mw *MainWindow) getPromptTextsCount() int {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	return len(mw.state.promptTexts)
+}
+
+func (mw *MainWindow) getPromptTexts() []string {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	if mw.state.promptTexts == nil {
+		return nil
+	}
+	res := make([]string, len(mw.state.promptTexts))
+	copy(res, mw.state.promptTexts)
+	return res
+}
+
+type stateSnapshot struct {
+	currentFile   string
+	currentResult *extractor.ExtractionResult
+	promptTexts   []string
+	mode          string
+	busy          bool
+	autoCopy      bool
+}
+
+func (mw *MainWindow) snapshotForSave() stateSnapshot {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	var promptTexts []string
+	if mw.state.promptTexts != nil {
+		promptTexts = make([]string, len(mw.state.promptTexts))
+		copy(promptTexts, mw.state.promptTexts)
+	}
+	return stateSnapshot{
+		currentFile:   mw.state.currentFile,
+		currentResult: mw.state.currentResult,
+		promptTexts:   promptTexts,
+		mode:          mw.state.mode,
+		busy:          mw.state.busy,
+		autoCopy:      mw.state.autoCopy,
+	}
+}
+
+func (mw *MainWindow) clearState() {
+	mw.state.mu.Lock()
+	defer mw.state.mu.Unlock()
+	mw.state.busy = false
+	mw.state.currentFile = ""
+	mw.state.currentResult = nil
+	mw.state.promptTexts = nil
+	if mw.state.cancel != nil {
+		mw.state.cancel()
+		mw.state.cancel = nil
+	}
+}
+
+func (mw *MainWindow) loadFile(path string) {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext != ".png" && ext != ".json" {
 		return
 	}
 
+	mw.state.mu.Lock()
+	if mw.state.cancel != nil {
+		mw.state.cancel()
+	}
+	mw.state.currentFile = path
+	mw.state.mu.Unlock()
+
 	mw.processFile(path)
 }
 
 func (mw *MainWindow) setUIBusy(busy bool) {
-	mw.state.mu.Lock()
-	mw.state.busy = busy
-	mw.state.mu.Unlock()
+	mw.setBusy(busy)
 
 	if busy {
 		mw.progressBar.Show()
@@ -357,42 +463,20 @@ func (mw *MainWindow) processFile(file string) {
 	// Use a background context that we can cancel
 	ctx, cancel := context.WithCancel(context.Background())
 	mw.state.cancel = cancel
+	mw.state.currentFile = file
 	mw.state.mu.Unlock()
 
 	mw.setUIBusy(true)
-	mw.state.mu.Lock()
-	mw.state.currentFile = file
-	mw.state.mu.Unlock()
 
 	// Release previous preview image reference
 	mw.releasePreviewImage()
 
-	// Immediately clear old state and hide preview
+	// Immediately clear old state
 	mw.promptEntry.SetText("")
 	mw.summaryEntry.SetText("")
-	mw.previewCont.Hide()
 
-	currentMode := mw.state.mode
+	currentMode := mw.getMode()
 	done := make(chan struct{})
-
-	// Safety net goroutine: resets busy flag directly if extraction hangs.
-	// Does NOT use fyne.Do — works even if Fyne's event loop is stuck.
-	go func() {
-		timer := time.NewTimer(30 * time.Second)
-		defer timer.Stop()
-		select {
-		case <-done:
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-			if mw.isBusy() {
-				log.Printf("[WARN] Processing safety net triggered after 30s")
-				mw.state.mu.Lock()
-				mw.state.busy = false
-				mw.state.mu.Unlock()
-			}
-		}
-	}()
 
 	go func() {
 		defer close(done)
@@ -486,22 +570,14 @@ func (mw *MainWindow) processFile(file string) {
 
 		// Post all UI updates back on the main thread
 		fyne.Do(func() {
+			var label string
 			if thumbImg != nil {
-				// Release old GPU texture before swapping in a new image
-				if oldImg, ok := mw.previewBoxCont.Objects[1].(*canvas.Image); ok {
-					oldImg.Image = nil
-					oldImg.Refresh()
-				}
-				newImg := canvas.NewImageFromImage(thumbImg)
-				newImg.FillMode = canvas.ImageFillContain
-				mw.previewBoxCont.Objects[1] = newImg // index 1 because index 0 is the background rectangle
-				mw.previewBoxCont.Refresh()
-				mw.previewImg = newImg
-
 				ratioStr := calculateAspectRatio(thumbW, thumbH)
-				mw.previewLabel.SetText(fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(file)))
-				mw.previewCont.Show()
+				label = fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(file))
 			}
+			mw.previewImg.Image = thumbImg
+			mw.previewImg.Refresh()
+			mw.previewLabel.SetText(label)
 			mw.onExtractionFinished(result)
 		})
 	}()
@@ -544,8 +620,7 @@ func (mw *MainWindow) onExtractionFinished(result *extractor.ExtractionResult) {
 	}
 	summaryLines = append(summaryHeader, summaryLines...)
 
-	mw.state.currentResult = result
-	mw.state.promptTexts = allTexts
+	mw.setCurrent(result, allTexts)
 
 	// Update UI on main thread
 	mw.promptEntry.SetText(strings.Join(promptLines, "\n"))
@@ -564,56 +639,33 @@ func (mw *MainWindow) onExtractionFinished(result *extractor.ExtractionResult) {
 	mw.statusDot.Show()
 	mw.statusDot.Refresh()
 
-	if mw.state.autoCopy && len(allTexts) > 0 {
+	if mw.getAutoCopy() && len(allTexts) > 0 {
 		mw.copyPrompts()
 		mw.statusLabel.SetText(mw.statusLabel.Text + " [COPIED TO CLIPBOARD]")
 	}
 
 	mw.setUIBusy(false)
-	runtime.GC()
 }
 
 func (mw *MainWindow) copyPrompts() {
-	if len(mw.state.promptTexts) == 0 {
+	prompts := mw.getPromptTexts()
+	if len(prompts) == 0 {
 		return
 	}
-	text := strings.Join(mw.state.promptTexts, "\n\n")
+	text := strings.Join(prompts, "\n\n")
 	clipboard.WriteAll(text)
 }
 
 func (mw *MainWindow) clearResults() {
-	mw.state.mu.Lock()
-	mw.state.busy = false // Force-reset stuck busy flag (emergency recovery)
-	mw.state.currentFile = ""
-	mw.state.currentResult = nil
-	mw.state.promptTexts = nil
-	if mw.state.cancel != nil {
-		mw.state.cancel()
-	}
-	mw.state.mu.Unlock()
+	mw.clearState()
 
-	// Recreate text widgets to fully release internal state
-	mw.promptEntry = NewReadOnlyEntry()
-	mw.promptEntry.Wrapping = fyne.TextWrapWord
-	mw.promptEntry.TextStyle = fyne.TextStyle{Monospace: true}
-
-	mw.summaryEntry = NewReadOnlyEntry()
-	mw.summaryEntry.Wrapping = fyne.TextWrapWord
-
-	// Update the scroll containers
-	mw.promptScroll.Content = mw.promptEntry
-	mw.promptScroll.Refresh()
-	mw.summaryScroll.Content = mw.summaryEntry
-	mw.summaryScroll.Refresh()
+	// Stop recreating the two ReadOnlyEntry widgets; call SetText("") on existing ones.
+	mw.promptEntry.SetText("")
+	mw.summaryEntry.SetText("")
 
 	// Reset preview
 	mw.releasePreviewImage()
-	newImg := canvas.NewImageFromImage(nil)
-	newImg.FillMode = canvas.ImageFillContain
-	mw.previewBoxCont.Objects[1] = newImg
-	mw.previewBoxCont.Refresh()
-	mw.previewImg = newImg
-	mw.previewCont.Hide()
+	mw.previewLabel.SetText("")
 
 	mw.tabs.Hide()
 	mw.emptyState.Show()
@@ -623,11 +675,12 @@ func (mw *MainWindow) clearResults() {
 	mw.statusDot.Hide()
 	mw.statusDot.Refresh()
 	mw.updateButtonStates()
-	runtime.GC()
 }
 
 func (mw *MainWindow) updateButtonStates() {
+	mw.state.mu.Lock()
 	hasResults := len(mw.state.promptTexts) > 0 && !mw.state.busy
+	mw.state.mu.Unlock()
 	if hasResults {
 		mw.copyBtn.Enable()
 		mw.saveBtn.Enable()
@@ -641,12 +694,13 @@ func (mw *MainWindow) updateButtonStates() {
 }
 
 func (mw *MainWindow) saveToFile() {
-	if len(mw.state.promptTexts) == 0 {
+	snap := mw.snapshotForSave()
+	if len(snap.promptTexts) == 0 {
 		return
 	}
 
-	base := strings.TrimSuffix(filepath.Base(mw.state.currentFile),
-		filepath.Ext(mw.state.currentFile))
+	base := strings.TrimSuffix(filepath.Base(snap.currentFile),
+		filepath.Ext(snap.currentFile))
 	defaultName := base + "_prompts.txt"
 
 	d := dialog.NewFileSave(func(w fyne.URIWriteCloser, err error) {
@@ -659,18 +713,20 @@ func (mw *MainWindow) saveToFile() {
 		fmt.Fprintln(writer, strings.Repeat("=", 60))
 		fmt.Fprintln(writer, "COMFYUI POSITIVE PROMPTS EXTRACTION")
 		fmt.Fprintln(writer, strings.Repeat("=", 60))
-		fmt.Fprintf(writer, "\nExtractor mode: %s\n", mw.state.mode)
-		fmt.Fprintf(writer, "File processed: %s\n", mw.state.currentFile)
-		fmt.Fprintf(writer, "Total prompts: %d\n", len(mw.state.promptTexts))
+		fmt.Fprintf(writer, "\nExtractor mode: %s\n", snap.mode)
+		fmt.Fprintf(writer, "File processed: %s\n", snap.currentFile)
+		fmt.Fprintf(writer, "Total prompts: %d\n", len(snap.promptTexts))
 		fmt.Fprintf(writer, "Extraction date: %s\n", time.Now().Format("2006-01-02 15:04:05"))
 		fmt.Fprintln(writer, "\n"+strings.Repeat("=", 60))
 
-		result := mw.state.currentResult
-		for j, p := range result.PositivePrompts {
-			if len(result.PositivePrompts) > 1 {
-				fmt.Fprintf(writer, "Prompt %d - %s:\n%s\n", j+1, p.Title, strings.Repeat("-", 40))
+		result := snap.currentResult
+		if result != nil {
+			for j, p := range result.PositivePrompts {
+				if len(result.PositivePrompts) > 1 {
+					fmt.Fprintf(writer, "Prompt %d - %s:\n%s\n", j+1, p.Title, strings.Repeat("-", 40))
+				}
+				fmt.Fprintln(writer, p.Text)
 			}
-			fmt.Fprintln(writer, p.Text)
 		}
 		writer.Flush()
 	}, mw.window)
@@ -706,8 +762,8 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 	// Re-wrap LimitReader after seek
 	lr = io.LimitReader(f, 200*1024*1024)
 
-	// Dimension guardrail
-	if config.Width > 12000 || config.Height > 12000 {
+	// Dimension guardrail: pixel budget instead of axis budget
+	if config.Width*config.Height > 64000000 {
 		return nil, config.Width, config.Height, fmt.Errorf("image dimensions too large (%dx%d)", config.Width, config.Height)
 	}
 
@@ -731,7 +787,6 @@ func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) 
 
 	// Explicitly release original to free memory faster
 	img = nil
-	runtime.GC()
 
 	return dst, origW, origH, nil
 }
