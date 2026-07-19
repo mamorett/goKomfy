@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -13,6 +14,7 @@ import (
 
 type DropZone struct {
 	widget.BaseWidget
+	mu       sync.Mutex
 	label    *widget.Label
 	icon     *widget.Icon
 	hovered  bool
@@ -70,12 +72,19 @@ func (r *dropZoneRenderer) MinSize() fyne.Size {
 	return fyne.NewSize(150, 100)
 }
 
+func (d *DropZone) isBlinkingOrHovered() (bool, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.blinking, d.hovered
+}
+
 func (r *dropZoneRenderer) Refresh() {
-	if r.dropZone.blinking {
+	blinking, hovered := r.dropZone.isBlinkingOrHovered()
+	if blinking {
 		r.bg.FillColor = theme.PrimaryColor()
 		r.border.StrokeColor = theme.PrimaryColor()
 		r.dropZone.label.TextStyle.Bold = true
-	} else if r.dropZone.hovered {
+	} else if hovered {
 		r.border.StrokeColor = theme.PrimaryColor()
 		r.border.StrokeWidth = 3
 		r.bg.FillColor = theme.HoverColor()
@@ -99,23 +108,30 @@ func (r *dropZoneRenderer) Objects() []fyne.CanvasObject {
 func (r *dropZoneRenderer) Destroy() {}
 
 func (d *DropZone) MouseIn(ev *desktop.MouseEvent) {
+	d.mu.Lock()
 	d.hovered = true
+	d.mu.Unlock()
 	d.Refresh()
 }
 
 func (d *DropZone) MouseOut() {
+	d.mu.Lock()
 	d.hovered = false
+	d.mu.Unlock()
 	d.Refresh()
 }
 
 func (d *DropZone) Flash() {
+	d.mu.Lock()
 	d.blinking = true
+	d.mu.Unlock()
 	d.Refresh()
-	go func() {
-		time.Sleep(150 * time.Millisecond)
+	time.AfterFunc(150*time.Millisecond, func() {
+		d.mu.Lock()
+		d.blinking = false
+		d.mu.Unlock()
 		fyne.Do(func() {
-			d.blinking = false
 			d.Refresh()
 		})
-	}()
+	})
 }
