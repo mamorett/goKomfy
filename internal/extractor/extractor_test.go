@@ -194,3 +194,73 @@ func TestExtractJSON(t *testing.T) {
 		t.Errorf("wrong prompt text: %s", result.PositivePrompts[0].Text)
 	}
 }
+
+func TestExtractStandardA1111Parameters(t *testing.T) {
+	// Standard A1111 metadata format without "Positive prompt:" header
+	params := "a cute kitten on a windowsill, 8k, detailed\nNegative prompt: blurry, ugly\nSteps: 20, Sampler: DPM++ 2M Karras, CFG scale: 7, Seed: 12345, Size: 512x512"
+	textData := append([]byte("parameters"), 0)
+	textData = append(textData, []byte(params)...)
+
+	path := createTestPNG(t, []struct {
+		typeName string
+		data     []byte
+	}{
+		{"tEXt", textData},
+	})
+	defer os.Remove(path)
+
+	e := &PromptExtractor{}
+	result, err := e.ExtractParameters(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(result.PositivePrompts) != 1 {
+		t.Fatalf("expected 1 positive prompt, got %d", len(result.PositivePrompts))
+	}
+	if result.PositivePrompts[0].Text != "a cute kitten on a windowsill, 8k, detailed" {
+		t.Errorf("wrong prompt text: %s", result.PositivePrompts[0].Text)
+	}
+}
+
+func TestExtractMultiLineA1111Parameters(t *testing.T) {
+	params := "masterpiece, best quality,\n1girl, solo, outdoors,\nsunlight filtering through trees\nNegative prompt: (worst quality:1.4), bad anatomy\nSteps: 30, Sampler: DPM++ 2M Karras, CFG scale: 7, Seed: 99999, Size: 768x1024"
+	textData := append([]byte("parameters"), 0)
+	textData = append(textData, []byte(params)...)
+
+	path := createTestPNG(t, []struct {
+		typeName string
+		data     []byte
+	}{
+		{"tEXt", textData},
+	})
+	defer os.Remove(path)
+
+	e := &PromptExtractor{}
+
+	// Test in Parameters mode
+	result, err := e.ExtractParameters(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.PositivePrompts) != 1 {
+		t.Fatalf("expected 1 positive prompt, got %d", len(result.PositivePrompts))
+	}
+	expected := "masterpiece, best quality,\n1girl, solo, outdoors,\nsunlight filtering through trees"
+	if result.PositivePrompts[0].Text != expected {
+		t.Errorf("expected:\n%s\ngot:\n%s", expected, result.PositivePrompts[0].Text)
+	}
+
+	// Test in ComfyUI mode (should automatically fallback)
+	resultComfy, err := e.ExtractComfyUI(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(resultComfy.PositivePrompts) != 1 {
+		t.Fatalf("expected 1 positive prompt in ComfyUI fallback, got %d", len(resultComfy.PositivePrompts))
+	}
+	if resultComfy.PositivePrompts[0].Text != expected {
+		t.Errorf("expected:\n%s\ngot:\n%s", expected, resultComfy.PositivePrompts[0].Text)
+	}
+}
+

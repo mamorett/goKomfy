@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"unicode/utf8"
 )
 
 var (
@@ -19,6 +20,18 @@ const (
 	maxChunkLength      = 100 * 1024 * 1024 // 100 MB
 	maxDecompressedSize = 100 * 1024 * 1024 // 100 MB
 )
+
+func decodeString(b []byte) string {
+	b = bytes.Trim(b, "\x00")
+	if utf8.Valid(b) {
+		return string(b)
+	}
+	runes := make([]rune, len(b))
+	for i, c := range b {
+		runes[i] = rune(c)
+	}
+	return string(runes)
+}
 
 // ReadTextChunks opens a PNG file and returns all text metadata as a map.
 // Keys are chunk keywords (e.g. "workflow", "prompt", "parameters",
@@ -93,9 +106,7 @@ func ReadTextChunksFromReader(f io.ReadSeeker) (map[string]string, error) {
 			parts := bytes.SplitN(data, []byte{0}, 2)
 			if len(parts) == 2 {
 				key := string(parts[0])
-				// Latin-1 to UTF-8 conversion: treat each byte as its Unicode codepoint
-				val := string(parts[1])
-				meta[key] = val
+				meta[key] = decodeString(parts[1])
 			}
 		case "zTXt":
 			// 4. zTXt: split at first \x00 for key; next byte is compression method (must be 0); remainder is zlib
@@ -109,7 +120,7 @@ func ReadTextChunksFromReader(f io.ReadSeeker) (map[string]string, error) {
 						var buf bytes.Buffer
 						// 4.4. Handle decompression bombs
 						if _, err := io.CopyN(&buf, zr, maxDecompressedSize); err == nil || err == io.EOF {
-							meta[key] = buf.String()
+							meta[key] = decodeString(buf.Bytes())
 						} else {
 							log.Printf("[WARN] Decompression limit hit for key: %s", key)
 						}
@@ -137,14 +148,14 @@ func ReadTextChunksFromReader(f io.ReadSeeker) (map[string]string, error) {
 								var buf bytes.Buffer
 								// 4.4. Handle decompression bombs
 								if _, err := io.CopyN(&buf, zr, maxDecompressedSize); err == nil || err == io.EOF {
-									meta[key] = buf.String()
+									meta[key] = decodeString(buf.Bytes())
 								} else {
 									log.Printf("[WARN] Decompression limit hit for key: %s", key)
 								}
 								zr.Close()
 							}
 						} else {
-							meta[key] = string(valData)
+							meta[key] = decodeString(valData)
 						}
 					}
 				}
