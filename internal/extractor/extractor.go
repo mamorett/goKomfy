@@ -100,13 +100,32 @@ func (e *PromptExtractor) ExtractComfyUI(filePath string, opts ...*ExtractionOpt
 		if promptJSON, ok := meta["prompt"]; ok {
 			var promptData map[string]any
 			if err := json.Unmarshal([]byte(promptJSON), &promptData); err == nil {
-				// For prompt data, we need a map[string]bool for processed nodes
-				// but extractPositiveFromWorkflow uses map[any]bool.
-				// Let's make extractPositiveFromPromptData also use map[any]bool for consistency if possible,
-				// or just convert.
 				prompts := e.extractPositiveFromPromptData(promptData, processedNodes)
 				result.PositivePrompts = append(result.PositivePrompts, prompts...)
 			}
+		}
+	}
+
+	// Fallback to parameters/PNG properties if no ComfyUI metadata found
+	if len(result.PositivePrompts) == 0 {
+		if promptText, ok := e.extractPositiveFromParametersStrict(meta); ok {
+			result.PositivePrompts = append(result.PositivePrompts, PromptInfo{
+				Text:     promptText,
+				NodeID:   "parameters",
+				NodeType: "parameters",
+				Title:    "Parameters",
+				Source:   "parameters",
+			})
+			result.ExtractionMethod = "parameters"
+		} else if promptText, ok := e.extractPositiveFromPNGProperties(meta); ok {
+			result.PositivePrompts = append(result.PositivePrompts, PromptInfo{
+				Text:     promptText,
+				NodeID:   "png_properties",
+				NodeType: "png_properties",
+				Title:    "PNG Properties",
+				Source:   "png_properties",
+			})
+			result.ExtractionMethod = "png_properties"
 		}
 	}
 
@@ -161,16 +180,32 @@ func (e *PromptExtractor) ExtractParameters(filePath string, opts ...*Extraction
 			Title:    "Parameters",
 			Source:   "parameters",
 		})
+	} else if promptText, ok := e.extractPositiveFromPNGProperties(meta); ok {
+		result.PositivePrompts = append(result.PositivePrompts, PromptInfo{
+			Text:     promptText,
+			NodeID:   "png_properties",
+			NodeType: "png_properties",
+			Title:    "PNG Properties",
+			Source:   "png_properties",
+		})
 	} else {
-		// If original method fails, try PNG properties as fallback
-		if promptText, ok := e.extractPositiveFromPNGProperties(meta); ok {
-			result.PositivePrompts = append(result.PositivePrompts, PromptInfo{
-				Text:     promptText,
-				NodeID:   "png_properties",
-				NodeType: "png_properties",
-				Title:    "PNG Properties",
-				Source:   "png_properties",
-			})
+		// Fallback to ComfyUI workflow/prompt if Parameters mode selected on a ComfyUI image
+		processedNodes := make(map[any]bool)
+		if workflowJSON, ok := meta["workflow"]; ok {
+			var workflowData map[string]any
+			if err := json.Unmarshal([]byte(workflowJSON), &workflowData); err == nil {
+				prompts := e.extractPositiveFromWorkflow(workflowData, processedNodes)
+				result.PositivePrompts = append(result.PositivePrompts, prompts...)
+			}
+		}
+		if len(result.PositivePrompts) == 0 {
+			if promptJSON, ok := meta["prompt"]; ok {
+				var promptData map[string]any
+				if err := json.Unmarshal([]byte(promptJSON), &promptData); err == nil {
+					prompts := e.extractPositiveFromPromptData(promptData, processedNodes)
+					result.PositivePrompts = append(result.PositivePrompts, prompts...)
+				}
+			}
 		}
 	}
 
@@ -435,28 +470,75 @@ func (e *PromptExtractor) extractPositiveFromPNGProperties(meta map[string]strin
 		"positive prompt",
 		"Positive Prompt",
 		"positive_prompt",
+		"prompt",
+		"Prompt",
+		"Description",
+		"description",
+		"Comment",
+		"comment",
+		"user_comment",
+		"UserComment",
 	}
 
 	for _, key := range possibleKeys {
-		if val, ok := meta[key]; ok {
-			val = strings.TrimSpace(val)
-			if val != "" {
-				if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
-					(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
-					val = val[1 : len(val)-1]
+		for k, val := range meta {
+			if strings.EqualFold(k, key) {
+				val = strings.TrimSpace(val)
+				val = strings.Trim(val, "\x00\r")
+				if val != "" {
+					if (strings.HasPrefix(val, "\"") && strings.HasSuffix(val, "\"")) ||
+						(strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'")) {
+						val = val[1 : len(val)-1]
+					}
+					return val, true
 				}
-				return val, true
 			}
 		}
 	}
 	return "", false
 }
 
+func isDelimiterLine(line string) bool {
+	l := strings.ToLower(strings.TrimSpace(line))
+	if l == "" {
+		return false
+	}
+	if strings.HasPrefix(l, "negative prompt") || strings.HasPrefix(l, "steps:") {
+		return true
+	}
+	if strings.HasPrefix(l, "ti hashes:") || strings.HasPrefix(l, "lora hashes:") || strings.HasPrefix(l, "hashes:") || strings.HasPrefix(l, "version:") || strings.HasPrefix(l, "template:") {
+		return true
+	}
+	if strings.Contains(l, "steps:") && (strings.Contains(l, "sampler:") || strings.Contains(l, "cfg scale:") || strings.Contains(l, "seed:")) {
+		return true
+	}
+	return false
+}
+
 func (e *PromptExtractor) extractPositiveFromParametersStrict(meta map[string]string) (string, bool) {
-	params, ok := meta["parameters"]
-	if !ok {
+	var params string
+	var found bool
+	for k, v := range meta {
+		if strings.EqualFold(k, "parameters") {
+			params = v
+			found = true
+			break
+		}
+	}
+	if !found {
+		for k, v := range meta {
+			if strings.EqualFold(k, "prompt") || strings.EqualFold(k, "description") || strings.EqualFold(k, "comment") {
+				params = v
+				found = true
+				break
+			}
+		}
+	}
+	if !found || strings.TrimSpace(params) == "" {
 		return "", false
 	}
+
+	params = strings.Trim(params, "\x00\r")
 
 	// Try JSON first
 	var parsed map[string]any
@@ -466,8 +548,12 @@ func (e *PromptExtractor) extractPositiveFromParametersStrict(meta map[string]st
 			"positive prompt",
 			"Positive Prompt",
 			"positive_prompt",
+			"positive",
+			"Positive",
 			"prompt",
 			"Prompt",
+			"text",
+			"Text",
 		}
 		for _, key := range possibleKeys {
 			if v, ok := parsed[key]; ok {
@@ -481,13 +567,17 @@ func (e *PromptExtractor) extractPositiveFromParametersStrict(meta map[string]st
 					}
 					return sb.String(), true
 				}
-				return fmt.Sprintf("%v", v), true
+				if strVal := fmt.Sprintf("%v", v); strings.TrimSpace(strVal) != "" {
+					return strVal, true
+				}
 			}
 		}
 	}
 
-	// Parse text format
+	// Parse text format (Automatic1111)
 	lines := strings.Split(params, "\n")
+
+	// Case A: Look for explicit "Positive prompt:" header
 	for i, line := range lines {
 		lineTrimmedLower := strings.ToLower(strings.TrimSpace(line))
 		if strings.HasPrefix(lineTrimmedLower, "positive prompt:") {
@@ -497,7 +587,7 @@ func (e *PromptExtractor) extractPositiveFromParametersStrict(meta map[string]st
 				promptText = strings.TrimSpace(parts[1])
 			}
 
-			promptLines := []string{}
+			var promptLines []string
 			if promptText != "" {
 				promptLines = append(promptLines, promptText)
 			}
@@ -505,34 +595,32 @@ func (e *PromptExtractor) extractPositiveFromParametersStrict(meta map[string]st
 			j := i + 1
 			for j < len(lines) {
 				nextLine := lines[j]
-				nl := strings.ToLower(strings.TrimSpace(nextLine))
-				if strings.Contains(nl, ":") {
-					foundParam := false
-					for _, param := range []string{"negative prompt", "steps", "sampler", "cfg scale", "seed", "size", "model", "clip skip"} {
-						if strings.Contains(nl, param) {
-							foundParam = true
-							break
-						}
-					}
-					if foundParam {
-						break
-					}
+				if isDelimiterLine(nextLine) {
+					break
 				}
 				promptLines = append(promptLines, strings.TrimRight(nextLine, "\r\n"))
 				j++
 			}
 
-			fullPrompt := strings.TrimRight(strings.Join(promptLines, "\n"), "\n\r ")
-			outLines := strings.Split(fullPrompt, "\n")
-			k := 0
-			for k < len(outLines) && strings.TrimSpace(outLines[k]) == "" {
-				k++
+			fullPrompt := strings.TrimSpace(strings.Join(promptLines, "\n"))
+			if fullPrompt != "" {
+				return fullPrompt, true
 			}
-			if k < len(outLines) {
-				return strings.Join(outLines[k:], "\n"), true
-			}
-			return "", false
 		}
+	}
+
+	// Case B: Standard Automatic1111 format without "Positive prompt:" header
+	var promptLines []string
+	for _, line := range lines {
+		if isDelimiterLine(line) {
+			break
+		}
+		promptLines = append(promptLines, strings.TrimRight(line, "\r\n"))
+	}
+
+	fullPrompt := strings.TrimSpace(strings.Join(promptLines, "\n"))
+	if fullPrompt != "" {
+		return fullPrompt, true
 	}
 
 	return "", false
