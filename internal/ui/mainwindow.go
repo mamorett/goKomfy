@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	_ "image/gif"
-	_ "image/jpeg"
 	_ "image/png"
 	"io"
 	"log"
@@ -31,7 +29,9 @@ import (
 )
 
 const (
-	maxThumbnailSize = 400 * 400 * 4 // RGBA bytes
+	// maxThumbnailSourcePixels bounds full-resolution decoding for the optional
+	// preview. Extraction itself never decodes pixels; this only caps preview cost.
+	maxThumbnailSourcePixels = 8_000_000
 )
 
 type AppState struct {
@@ -42,7 +42,12 @@ type AppState struct {
 	mode          string // "ComfyUI" or "Parameters"
 	busy          bool
 	autoCopy      bool
-	cancel        context.CancelFunc
+}
+
+type loadJob struct {
+	path string
+	mode string
+	gen  uint64
 }
 
 type MainWindow struct {
@@ -76,6 +81,15 @@ type MainWindow struct {
 	aboutBtn    *widget.Button
 	statusLabel *widget.Label
 	statusDot   *canvas.Circle
+
+	// Load-worker state. This bounds concurrency to a single active job plus one
+	// pending (latest-wins) job, so rapid drops can never pile up decodes.
+	loadMu        sync.Mutex
+	nextGen       uint64
+	latestJob     *loadJob
+	jobWake       chan struct{}
+	stopWorker    chan struct{}
+	currentCancel context.CancelFunc
 }
 
 func NewMainWindow(a fyne.App) *MainWindow {
@@ -93,6 +107,10 @@ func NewMainWindow(a fyne.App) *MainWindow {
 	mw.setupShortcuts()
 	mw.setupMenu()
 
+	mw.jobWake = make(chan struct{}, 1)
+	mw.stopWorker = make(chan struct{})
+	go mw.runLoadWorker()
+
 	return mw
 }
 
@@ -101,8 +119,8 @@ func (mw *MainWindow) setupUI() {
 	mw.modeSelect = widget.NewSelect([]string{"ComfyUI", "Parameters"}, func(s string) {
 		mw.setMode(s)
 		curFile := mw.getCurrentFile()
-		if curFile != "" && !mw.isBusy() {
-			mw.processFile(curFile)
+		if curFile != "" {
+			mw.loadFile(curFile)
 		}
 	})
 	mw.modeSelect.SetSelected(mw.getMode())
@@ -410,10 +428,6 @@ func (mw *MainWindow) clearState() {
 	mw.state.currentFile = ""
 	mw.state.currentResult = nil
 	mw.state.promptTexts = nil
-	if mw.state.cancel != nil {
-		mw.state.cancel()
-		mw.state.cancel = nil
-	}
 }
 
 func (mw *MainWindow) loadFile(path string) {
@@ -421,15 +435,37 @@ func (mw *MainWindow) loadFile(path string) {
 	if ext != ".png" && ext != ".json" {
 		return
 	}
+	mw.queue(path)
+}
 
-	mw.state.mu.Lock()
-	if mw.state.cancel != nil {
-		mw.state.cancel()
+// queue records the latest requested file and wakes the load worker. Latest-wins:
+// a pending job is overwritten and the currently running job is cancelled (its
+// running decode can't be aborted, but its remaining work is skipped).
+func (mw *MainWindow) queue(path string) {
+	mw.loadMu.Lock()
+	mw.nextGen++
+	mw.latestJob = &loadJob{path: path, mode: mw.getMode(), gen: mw.nextGen}
+	if mw.currentCancel != nil {
+		mw.currentCancel()
 	}
-	mw.state.currentFile = path
-	mw.state.mu.Unlock()
+	mw.loadMu.Unlock()
 
-	mw.processFile(path)
+	select {
+	case mw.jobWake <- struct{}{}:
+	default:
+	}
+}
+
+// cancelPendingLoad cancels the active job and drops the queued one. Used by
+// Clear so a cancelled-but-in-flight job can't repopulate the UI afterwards.
+func (mw *MainWindow) cancelPendingLoad() {
+	mw.loadMu.Lock()
+	mw.nextGen++ // invalidate any in-flight job so it won't repopulate the UI
+	mw.latestJob = nil
+	if mw.currentCancel != nil {
+		mw.currentCancel()
+	}
+	mw.loadMu.Unlock()
 }
 
 func (mw *MainWindow) setUIBusy(busy bool) {
@@ -454,133 +490,145 @@ func (mw *MainWindow) releasePreviewImage() {
 	}
 }
 
-func (mw *MainWindow) processFile(file string) {
-	// Cancel any existing processing
-	mw.state.mu.Lock()
-	if mw.state.cancel != nil {
-		mw.state.cancel()
-	}
-	// Use a background context that we can cancel
-	ctx, cancel := context.WithCancel(context.Background())
-	mw.state.cancel = cancel
-	mw.state.currentFile = file
-	mw.state.mu.Unlock()
+// runLoadWorker is the single background worker that processes drops. It runs
+// exactly one job at a time and keeps at most one pending job (latest-wins),
+// which is what finally bounds the memory/CPU used by preview decodes.
+func (mw *MainWindow) runLoadWorker() {
+	for {
+		mw.loadMu.Lock()
+		job := mw.latestJob
+		mw.latestJob = nil
+		mw.loadMu.Unlock()
 
-	mw.setUIBusy(true)
-
-	// Release previous preview image reference
-	mw.releasePreviewImage()
-
-	// Immediately clear old state
-	mw.promptEntry.SetText("")
-	mw.summaryEntry.SetText("")
-
-	currentMode := mw.getMode()
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[PANIC] %v", r)
-				fyne.Do(func() {
-					mw.setUIBusy(false)
-					dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
-				})
-			}
-		}()
-
-		var thumbImg image.Image
-		var thumbW, thumbH int
-		if strings.ToLower(filepath.Ext(file)) == ".png" {
-			// Check if we were cancelled before thumb loading
+		if job == nil {
 			select {
-			case <-ctx.Done():
+			case <-mw.jobWake:
+			case <-mw.stopWorker:
 				return
-			default:
 			}
-
-			thumbCtx, thumbCancel := context.WithTimeout(ctx, 5*time.Second)
-			select {
-			case <-thumbCtx.Done():
-				log.Printf("[DEBUG] Thumbnail loading cancelled or timed out")
-			case res, ok := <-getThumbnailAsync(thumbCtx, file, 400):
-				if ok {
-					thumbImg, thumbW, thumbH = res.img, res.w, res.h
-				}
-			}
-			thumbCancel()
+			continue
 		}
 
-		// Check if we were cancelled during thumb loading
-		select {
-		case <-ctx.Done():
-			return
-		default:
+		mw.doProcessFile(job)
+	}
+}
+
+func (mw *MainWindow) doProcessFile(job *loadJob) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	mw.loadMu.Lock()
+	mw.currentCancel = cancel
+	mw.loadMu.Unlock()
+
+	defer cancel()
+
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[PANIC] %v", r)
+			fyne.Do(func() {
+				mw.setUIBusy(false)
+				dialog.ShowError(fmt.Errorf("internal panic: %v", r), mw.window)
+			})
 		}
-
-		// Run extraction
-		e := &extractor.PromptExtractor{}
-		var result *extractor.ExtractionResult
-		var err error
-		ext := strings.ToLower(filepath.Ext(file))
-
-		// Validate PNG files before full processing (Check size)
-		if ext == ".png" {
-			info, errStat := os.Stat(file)
-			if errStat == nil && info.Size() > 200*1024*1024 { // 200MB limit
-				result = &extractor.ExtractionResult{
-					FileInfo: extractor.FileInfo{Filename: filepath.Base(file)},
-					Error:    "File too large (> 200MB)",
-				}
-			}
-		}
-
-		if result == nil {
-			var opts *extractor.ExtractionOptions
-			if thumbImg != nil {
-				opts = &extractor.ExtractionOptions{Width: thumbW, Height: thumbH}
-			}
-
-			switch ext {
-			case ".json":
-				result, err = e.ExtractJSON(file)
-			case ".png":
-				if currentMode == "ComfyUI" {
-					result, err = e.ExtractComfyUI(file, opts)
-				} else {
-					result, err = e.ExtractParameters(file, opts)
-				}
-			}
-
-			if err != nil {
-				result = &extractor.ExtractionResult{
-					FileInfo: extractor.FileInfo{Filename: filepath.Base(file)},
-					Error:    err.Error(),
-				}
-			}
-		}
-
-		// Final check for cancellation before UI updates
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		// Post all UI updates back on the main thread
-		fyne.Do(func() {
-			var label string
-			if thumbImg != nil {
-				ratioStr := calculateAspectRatio(thumbW, thumbH)
-				label = fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(file))
-			}
-			mw.previewImg.Image = thumbImg
-			mw.previewImg.Refresh()
-			mw.previewLabel.SetText(label)
-			mw.onExtractionFinished(result)
-		})
 	}()
+
+	mw.setCurrentFile(job.path)
+
+	// Widget mutation must happen on the UI thread. Queue the "start" state, then
+	// do all heavy work here on the worker goroutine.
+	fyne.Do(func() {
+		mw.setUIBusy(true)
+		mw.releasePreviewImage()
+		mw.promptEntry.SetText("")
+		mw.summaryEntry.SetText("")
+	})
+
+	ext := strings.ToLower(filepath.Ext(job.path))
+
+	var thumbImg image.Image
+	var thumbW, thumbH int
+	thumbTooLarge := false
+	if ext == ".png" {
+		if ctx.Err() != nil {
+			return
+		}
+		var terr error
+		thumbImg, thumbW, thumbH, thumbTooLarge, terr = decodeThumbnail(ctx, job.path, 400)
+		if terr != nil && !thumbTooLarge {
+			log.Printf("[DEBUG] thumbnail failed for %s: %v", job.path, terr)
+			thumbImg, thumbW, thumbH = nil, 0, 0
+		}
+	}
+
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Run extraction (metadata only; never decodes pixels).
+	e := &extractor.PromptExtractor{}
+	var result *extractor.ExtractionResult
+	var err error
+
+	// Reject oversized PNG files before processing.
+	if ext == ".png" {
+		info, errStat := os.Stat(job.path)
+		if errStat == nil && info.Size() > 200*1024*1024 { // 200MB limit
+			result = &extractor.ExtractionResult{
+				FileInfo: extractor.FileInfo{Filename: filepath.Base(job.path)},
+				Error:    "File too large (> 200MB)",
+			}
+		}
+	}
+
+	if result == nil {
+		var opts *extractor.ExtractionOptions
+		if thumbW > 0 && thumbH > 0 {
+			opts = &extractor.ExtractionOptions{Width: thumbW, Height: thumbH}
+		}
+
+		switch ext {
+		case ".json":
+			result, err = e.ExtractJSON(job.path)
+		case ".png":
+			if job.mode == "ComfyUI" {
+				result, err = e.ExtractComfyUI(job.path, opts)
+			} else {
+				result, err = e.ExtractParameters(job.path, opts)
+			}
+		}
+
+		if err != nil {
+			result = &extractor.ExtractionResult{
+				FileInfo: extractor.FileInfo{Filename: filepath.Base(job.path)},
+				Error:    err.Error(),
+			}
+		}
+	}
+
+	// Post the final UI update on the main thread. Skip it if a newer job or a
+	// Clear superseded this one while it was processing.
+	fyne.Do(func() {
+		mw.loadMu.Lock()
+		stale := job.gen != mw.nextGen
+		mw.loadMu.Unlock()
+		if stale {
+			return
+		}
+
+		var label string
+		switch {
+		case thumbImg != nil:
+			ratioStr := calculateAspectRatio(thumbW, thumbH)
+			label = fmt.Sprintf("[%s] %d×%d | %s", ratioStr, thumbW, thumbH, filepath.Base(job.path))
+		case thumbTooLarge:
+			ratioStr := calculateAspectRatio(thumbW, thumbH)
+			label = fmt.Sprintf("[%s] %d×%d | %s — preview unavailable", ratioStr, thumbW, thumbH, filepath.Base(job.path))
+		}
+		mw.previewImg.Image = thumbImg
+		mw.previewImg.Refresh()
+		mw.previewLabel.SetText(label)
+		mw.onExtractionFinished(result)
+	})
 }
 
 func (mw *MainWindow) onExtractionFinished(result *extractor.ExtractionResult) {
@@ -657,7 +705,10 @@ func (mw *MainWindow) copyPrompts() {
 }
 
 func (mw *MainWindow) clearResults() {
+	// Drop any queued job and cancel the running one so it can't repopulate on finish.
+	mw.cancelPendingLoad()
 	mw.clearState()
+	mw.setUIBusy(false)
 
 	// Stop recreating the two ReadOnlyEntry widgets; call SetText("") on existing ones.
 	mw.promptEntry.SetText("")
@@ -738,57 +789,55 @@ func (mw *MainWindow) ShowAndRun() {
 	mw.window.ShowAndRun()
 }
 
-func loadThumbnail(filePath string, maxSize int) (image.Image, int, int, error) {
+func decodeThumbnail(ctx context.Context, filePath string, maxSize int) (image.Image, int, int, bool, error) {
 	f, err := os.Open(filePath)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, false, err
 	}
 	defer f.Close()
 
-	// Use LimitReader to prevent decompression bombs or massive file reads (200MB)
+	// DecodeConfig only parses the header — no pixel decode and no big allocation.
 	lr := io.LimitReader(f, 200*1024*1024)
-
-	// 3.3. Use image.DecodeConfig before full decode
 	config, _, err := image.DecodeConfig(lr)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, 0, 0, false, err
+	}
+	w, h := config.Width, config.Height
+
+	// Never fully decode an unreasonably large image just for a 400px preview.
+	// Extraction doesn't need the pixels; this only caps the preview cost.
+	if w*h > maxThumbnailSourcePixels {
+		return nil, w, h, true, nil
 	}
 
-	// Reset file pointer for full decode
-	_, err = f.Seek(0, 0)
-	if err != nil {
-		return nil, 0, 0, err
+	if ctx.Err() != nil {
+		return nil, w, h, false, ctx.Err()
 	}
-	// Re-wrap LimitReader after seek
+
+	if _, err := f.Seek(0, 0); err != nil {
+		return nil, w, h, false, err
+	}
 	lr = io.LimitReader(f, 200*1024*1024)
-
-	// Dimension guardrail: pixel budget instead of axis budget
-	if config.Width*config.Height > 64000000 {
-		return nil, config.Width, config.Height, fmt.Errorf("image dimensions too large (%dx%d)", config.Width, config.Height)
-	}
 
 	img, _, err := image.Decode(lr)
 	if err != nil {
-		return nil, 0, 0, err
+		return nil, w, h, false, err
 	}
 
 	origW := img.Bounds().Dx()
 	origH := img.Bounds().Dy()
 
-	// Scale down maintaining aspect ratio
+	// Scale down maintaining aspect ratio.
 	scale := float64(maxSize) / math.Max(float64(origW), float64(origH))
 	if scale >= 1.0 {
-		return img, origW, origH, nil
+		return img, origW, origH, false, nil
 	}
 	newW := int(float64(origW) * scale)
 	newH := int(float64(origH) * scale)
 	dst := image.NewRGBA(image.Rect(0, 0, newW, newH))
 	draw.BiLinear.Scale(dst, dst.Bounds(), img, img.Bounds(), draw.Over, nil)
 
-	// Explicitly release original to free memory faster
-	img = nil
-
-	return dst, origW, origH, nil
+	return dst, origW, origH, false, nil
 }
 
 func calculateAspectRatio(w, h int) string {
@@ -842,25 +891,4 @@ func gcd(a, b int) int {
 		a, b = b, a%b
 	}
 	return a
-}
-
-type thumbnailResult struct {
-	img image.Image
-	w   int
-	h   int
-}
-
-func getThumbnailAsync(ctx context.Context, filePath string, maxSize int) <-chan thumbnailResult {
-	ch := make(chan thumbnailResult, 1)
-	go func() {
-		defer close(ch)
-		img, w, h, err := loadThumbnail(filePath, maxSize)
-		if err == nil {
-			select {
-			case ch <- thumbnailResult{img, w, h}:
-			case <-ctx.Done():
-			}
-		}
-	}()
-	return ch
 }
