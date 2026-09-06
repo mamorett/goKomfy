@@ -23,7 +23,6 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/atotto/clipboard"
 	"github.com/mamorett/goKomfy/internal/extractor"
 	"golang.org/x/image/draw"
 )
@@ -69,11 +68,9 @@ type MainWindow struct {
 	previewCont    *fyne.Container
 	previewBoxCont *fyne.Container
 
-	promptScroll  *container.Scroll
-	summaryScroll *container.Scroll
-	tabs          *container.AppTabs
-	resultsStack  *fyne.Container
-	emptyState    *fyne.Container
+	tabs         *container.AppTabs
+	resultsStack *fyne.Container
+	emptyState   *fyne.Container
 
 	copyBtn     *widget.Button
 	saveBtn     *widget.Button
@@ -180,12 +177,9 @@ func (mw *MainWindow) setupUI() {
 	mw.summaryEntry = NewReadOnlyEntry()
 	mw.summaryEntry.Wrapping = fyne.TextWrapWord
 
-	mw.promptScroll = container.NewScroll(mw.promptEntry)
-	mw.summaryScroll = container.NewScroll(mw.summaryEntry)
-
 	mw.tabs = container.NewAppTabs(
-		container.NewTabItemWithIcon("Extracted Prompts", theme.FileTextIcon(), mw.promptScroll),
-		container.NewTabItemWithIcon("Summary", theme.InfoIcon(), mw.summaryScroll),
+		container.NewTabItemWithIcon("Extracted Prompts", theme.FileTextIcon(), mw.promptEntry),
+		container.NewTabItemWithIcon("Summary", theme.InfoIcon(), mw.summaryEntry),
 	)
 
 	// Empty State
@@ -209,6 +203,7 @@ func (mw *MainWindow) setupUI() {
 	// 3. Footer (Progress + Actions + Status)
 	mw.progressBar = widget.NewProgressBarInfinite()
 	mw.progressBar.Hide()
+	mw.progressBar.Stop()
 
 	mw.copyBtn = widget.NewButtonWithIcon("Copy Prompt(s)", theme.ContentCopyIcon(), mw.copyPrompts)
 	mw.copyBtn.Importance = widget.HighImportance
@@ -259,10 +254,7 @@ func (mw *MainWindow) setupUI() {
 
 	// Set window level drop as well
 	mw.window.SetOnDropped(func(p fyne.Position, uris []fyne.URI) {
-		if len(uris) > 0 && uris[0].Scheme() == "file" {
-			mw.dropZone.Flash()
-			mw.loadFile(uris[0].Path())
-		}
+		mw.HandleDrop(uris)
 	})
 
 	// Final Layout
@@ -320,6 +312,10 @@ func (mw *MainWindow) browseFiles() {
 		mw.loadFile(r.URI().Path())
 	}, mw.window)
 	d.Show()
+}
+
+func (mw *MainWindow) IsBusy() bool {
+	return mw.isBusy()
 }
 
 func (mw *MainWindow) isBusy() bool {
@@ -430,6 +426,13 @@ func (mw *MainWindow) clearState() {
 	mw.state.promptTexts = nil
 }
 
+func (mw *MainWindow) HandleDrop(uris []fyne.URI) {
+	if len(uris) > 0 && uris[0].Scheme() == "file" {
+		mw.dropZone.Flash()
+		mw.loadFile(uris[0].Path())
+	}
+}
+
 func (mw *MainWindow) loadFile(path string) {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext != ".png" && ext != ".json" {
@@ -473,10 +476,12 @@ func (mw *MainWindow) setUIBusy(busy bool) {
 
 	if busy {
 		mw.progressBar.Show()
+		mw.progressBar.Start()
 		mw.statusDot.FillColor = theme.WarningColor()
 		mw.statusDot.Show()
 		mw.statusLabel.SetText("Processing...")
 	} else {
+		mw.progressBar.Stop()
 		mw.progressBar.Hide()
 	}
 	mw.statusDot.Refresh()
@@ -532,13 +537,29 @@ func (mw *MainWindow) doProcessFile(job *loadJob) {
 		}
 	}()
 
+	// Safety cleanup: If this job exits for any reason (cancelled, stale, error, etc.)
+	// and there is no newer pending job waiting in queue, ensure UI busy state is cleared.
+	defer func() {
+		mw.loadMu.Lock()
+		hasPending := (mw.latestJob != nil)
+		mw.loadMu.Unlock()
+		if !hasPending {
+			fyne.Do(func() {
+				mw.loadMu.Lock()
+				hasPendingNow := (mw.latestJob != nil)
+				mw.loadMu.Unlock()
+				if !hasPendingNow {
+					mw.setUIBusy(false)
+				}
+			})
+		}
+	}()
+
 	mw.setCurrentFile(job.path)
 
-	// Widget mutation must happen on the UI thread. Queue the "start" state, then
-	// do all heavy work here on the worker goroutine.
+	// Widget mutation must happen on the UI thread.
 	fyne.Do(func() {
 		mw.setUIBusy(true)
-		mw.releasePreviewImage()
 		mw.promptEntry.SetText("")
 		mw.summaryEntry.SetText("")
 	})
@@ -701,7 +722,11 @@ func (mw *MainWindow) copyPrompts() {
 		return
 	}
 	text := strings.Join(prompts, "\n\n")
-	clipboard.WriteAll(text)
+	if mw.window != nil && mw.window.Clipboard() != nil {
+		mw.window.Clipboard().SetContent(text)
+	} else if mw.app != nil && mw.app.Clipboard() != nil {
+		mw.app.Clipboard().SetContent(text)
+	}
 }
 
 func (mw *MainWindow) clearResults() {

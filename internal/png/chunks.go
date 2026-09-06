@@ -84,6 +84,20 @@ func ReadTextChunksFromReader(f io.ReadSeeker) (map[string]string, error) {
 			continue
 		}
 
+		typeName := string(chunkType)
+		if typeName == "IEND" {
+			break
+		}
+
+		// Only allocate and read data for text metadata chunks.
+		// All other chunks (including large IDAT image data) are skipped with Seek.
+		if typeName != "tEXt" && typeName != "zTXt" && typeName != "iTXt" {
+			if _, err := f.Seek(int64(length)+4, io.SeekCurrent); err != nil {
+				return nil, err
+			}
+			continue
+		}
+
 		data := make([]byte, length)
 		if _, err := io.ReadFull(f, data); err != nil {
 			return nil, err
@@ -93,11 +107,6 @@ func ReadTextChunksFromReader(f io.ReadSeeker) (map[string]string, error) {
 		var crc uint32
 		if err := binary.Read(f, binary.BigEndian, &crc); err != nil {
 			return nil, err
-		}
-
-		typeName := string(chunkType)
-		if typeName == "IEND" {
-			break
 		}
 
 		switch typeName {

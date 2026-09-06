@@ -19,6 +19,7 @@ type DropZone struct {
 	icon     *widget.Icon
 	hovered  bool
 	blinking bool
+	timer    *time.Timer
 }
 
 func NewDropZone(text string) *DropZone {
@@ -98,7 +99,6 @@ func (r *dropZoneRenderer) Refresh() {
 	r.bg.Refresh()
 	r.border.Refresh()
 	r.dropZone.label.Refresh()
-	r.dropZone.icon.Refresh()
 }
 
 func (r *dropZoneRenderer) Objects() []fyne.CanvasObject {
@@ -124,14 +124,18 @@ func (d *DropZone) MouseOut() {
 func (d *DropZone) Flash() {
 	d.mu.Lock()
 	d.blinking = true
-	d.mu.Unlock()
-	d.Refresh()
-	time.AfterFunc(150*time.Millisecond, func() {
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+	d.timer = time.AfterFunc(150*time.Millisecond, func() {
 		d.mu.Lock()
 		d.blinking = false
+		d.timer = nil
 		d.mu.Unlock()
 		fyne.Do(func() {
 			d.Refresh()
 		})
 	})
+	d.mu.Unlock()
+	d.Refresh()
 }
