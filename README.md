@@ -71,10 +71,30 @@ The main interface for most users.
 - **Aspect Ratio**: Automatically shown below the preview image.
 - **Auto-Copy**: Enable the checkbox to skip manual copying.
 
-### CLI Tool (`gokomfy-cli`)
-Perfect for scripts or quick terminal checks.
+### CLI Tool (`gokomfy-cli` / `komfy-cli`)
+Full 1:1 command-line companion to the `goKomfy` GUI for scripts, pipelines, and terminal workflows.
 ```bash
+# Show detailed help (also shown when run without arguments)
+./build/gokomfy-cli --help
+
+# Extract positive prompt (default ComfyUI mode with fallback)
 ./build/gokomfy-cli path/to/image.png
+
+# Explicitly extract ComfyUI prompt or A1111/Forge Parameters prompt
+./build/gokomfy-cli --comfyui path/to/image.png
+./build/gokomfy-cli --parameters path/to/image.png
+
+# Print image resolution, aspect ratio, or both
+./build/gokomfy-cli --resolution path/to/image.png
+./build/gokomfy-cli --ratio path/to/image.png
+./build/gokomfy-cli -r -a path/to/image.png
+
+# Print prompt together with resolution and aspect ratio
+./build/gokomfy-cli -c -r -a path/to/image.png
+
+# Print full summary, save report to <name>_prompts.txt, or output as JSON
+./build/gokomfy-cli --all --save path/to/image.png
+./build/gokomfy-cli --json path/to/image.png
 ```
 
 ## 🛠️ System Requirements (Linux)

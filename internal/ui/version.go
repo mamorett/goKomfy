@@ -1,3 +1,5 @@
 package ui
 
-const AppVersion = "4.1.0"
+import "github.com/mamorett/goKomfy/internal/extractor"
+
+const AppVersion = extractor.AppVersion

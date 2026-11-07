@@ -866,54 +866,5 @@ func decodeThumbnail(ctx context.Context, filePath string, maxSize int) (image.I
 }
 
 func calculateAspectRatio(w, h int) string {
-	if h == 0 {
-		return "0:0"
-	}
-	ratio := float64(w) / float64(h)
-
-	type commonRatio struct {
-		label string
-		val   float64
-	}
-
-	ratios := []commonRatio{
-		{"1:1", 1.0},
-		{"4:3", 4.0 / 3.0},
-		{"3:4", 3.0 / 4.0},
-		{"3:2", 3.0 / 2.0},
-		{"2:3", 2.0 / 3.0},
-		{"16:9", 16.0 / 9.0},
-		{"9:16", 9.0 / 16.0},
-		{"9:7", 9.0 / 7.0},
-		{"7:9", 7.0 / 9.0},
-	}
-
-	bestMatch := ""
-	minDiff := 10.0 // Large initial value
-
-	for _, r := range ratios {
-		diff := math.Abs(ratio - r.val)
-		if diff < minDiff {
-			minDiff = diff
-			bestMatch = r.label
-		}
-	}
-
-	// If the difference is too large (e.g., > 0.05), just return the simplified fraction or decimal?
-	// But the user asked to round to meaningful ones. If it's very far, maybe we just use the closest.
-	// 0.05 is a reasonable threshold for "meaningful" matching.
-	if minDiff > 0.05 {
-		// Fallback to a simple GCD if it doesn't match common ones well
-		g := gcd(w, h)
-		return fmt.Sprintf("%d:%d", w/g, h/g)
-	}
-
-	return bestMatch
-}
-
-func gcd(a, b int) int {
-	for b != 0 {
-		a, b = b, a%b
-	}
-	return a
+	return extractor.CalculateAspectRatio(w, h)
 }

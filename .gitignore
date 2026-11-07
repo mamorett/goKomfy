@@ -33,6 +33,8 @@ go.work.sum
 build/
 .DS_Store
 plans/
-komfy-cli
-cmd/komfy/bundled.go
+/komfy-cli
+/gokomfy-cli
+/gokomfy
+/komfy
 .antigravitycli

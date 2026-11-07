@@ -1,46 +1,66 @@
 package extractor
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"image"
 	_ "image/png"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/mamorett/goKomfy/internal/png"
 )
 
+const (
+	// AppVersion is the shared version across komfy and komfy-cli.
+	AppVersion = "4.1.0"
+
+	// MaxPNGFileSize caps the maximum PNG file size (200 MB).
+	MaxPNGFileSize = 200 * 1024 * 1024
+)
+
 // FileInfo describes the source file.
 type FileInfo struct {
-	Filename string
-	Width    int
-	Height   int
-	Mode     string // "PNG", "JSON", "TEXT"
+	Filename    string `json:"filename"`
+	Width       int    `json:"width,omitempty"`
+	Height      int    `json:"height,omitempty"`
+	Resolution  string `json:"resolution,omitempty"`
+	AspectRatio string `json:"aspect_ratio,omitempty"`
+	Mode        string `json:"mode"` // "PNG", "JSON", "TEXT"
+}
+
+// HasDimensions returns true if the file is an image with valid dimensions.
+func (fi FileInfo) HasDimensions() bool {
+	return fi.Mode == "PNG" && fi.Width > 0 && fi.Height > 0
 }
 
 // PromptInfo holds one extracted positive prompt.
 type PromptInfo struct {
-	Text     string
-	NodeID   string
-	NodeType string
-	Title    string
-	Source   string
+	Text     string `json:"text"`
+	NodeID   string `json:"node_id"`
+	NodeType string `json:"node_type"`
+	Title    string `json:"title"`
+	Source   string `json:"source"`
 }
 
 // ExtractionResult is the result for one file.
 type ExtractionResult struct {
-	FileInfo         FileInfo
-	PositivePrompts  []PromptInfo
-	ExtractionMethod string
-	Error            string
+	FileInfo         FileInfo     `json:"file_info"`
+	PositivePrompts  []PromptInfo `json:"positive_prompts"`
+	ExtractionMethod string       `json:"extraction_method"`
+	Error            string       `json:"error,omitempty"`
 }
 
-// ExtractionOptions allows passing pre-calculated dimensions.
+// ExtractionOptions allows passing pre-calculated dimensions and strict mode settings.
 type ExtractionOptions struct {
 	Width  int
 	Height int
+	Strict bool
 }
 
 type PromptExtractor struct{}
@@ -53,10 +73,15 @@ func (e *PromptExtractor) ExtractComfyUI(filePath string, opts ...*ExtractionOpt
 	defer f.Close()
 
 	var w, h int
-	if len(opts) > 0 && opts[0] != nil && opts[0].Width > 0 {
-		w = opts[0].Width
-		h = opts[0].Height
-	} else {
+	var strict bool
+	if len(opts) > 0 && opts[0] != nil {
+		strict = opts[0].Strict
+		if opts[0].Width > 0 {
+			w = opts[0].Width
+			h = opts[0].Height
+		}
+	}
+	if w == 0 || h == 0 {
 		config, _, err := image.DecodeConfig(f)
 		if err != nil {
 			return nil, err
@@ -76,10 +101,12 @@ func (e *PromptExtractor) ExtractComfyUI(filePath string, opts ...*ExtractionOpt
 
 	result := &ExtractionResult{
 		FileInfo: FileInfo{
-			Filename: filepath.Base(filePath),
-			Width:    w,
-			Height:   h,
-			Mode:     "PNG",
+			Filename:    filepath.Base(filePath),
+			Width:       w,
+			Height:      h,
+			Resolution:  fmt.Sprintf("%dx%d", w, h),
+			AspectRatio: CalculateAspectRatio(w, h),
+			Mode:        "PNG",
 		},
 		ExtractionMethod: "comfyui",
 	}
@@ -106,8 +133,8 @@ func (e *PromptExtractor) ExtractComfyUI(filePath string, opts ...*ExtractionOpt
 		}
 	}
 
-	// Fallback to parameters/PNG properties if no ComfyUI metadata found
-	if len(result.PositivePrompts) == 0 {
+	// Fallback to parameters/PNG properties if no ComfyUI metadata found (unless strict mode)
+	if len(result.PositivePrompts) == 0 && !strict {
 		if promptText, ok := e.extractPositiveFromParametersStrict(meta); ok {
 			result.PositivePrompts = append(result.PositivePrompts, PromptInfo{
 				Text:     promptText,
@@ -140,10 +167,15 @@ func (e *PromptExtractor) ExtractParameters(filePath string, opts ...*Extraction
 	defer f.Close()
 
 	var w, h int
-	if len(opts) > 0 && opts[0] != nil && opts[0].Width > 0 {
-		w = opts[0].Width
-		h = opts[0].Height
-	} else {
+	var strict bool
+	if len(opts) > 0 && opts[0] != nil {
+		strict = opts[0].Strict
+		if opts[0].Width > 0 {
+			w = opts[0].Width
+			h = opts[0].Height
+		}
+	}
+	if w == 0 || h == 0 {
 		config, _, err := image.DecodeConfig(f)
 		if err != nil {
 			return nil, err
@@ -163,10 +195,12 @@ func (e *PromptExtractor) ExtractParameters(filePath string, opts ...*Extraction
 
 	result := &ExtractionResult{
 		FileInfo: FileInfo{
-			Filename: filepath.Base(filePath),
-			Width:    w,
-			Height:   h,
-			Mode:     "PNG",
+			Filename:    filepath.Base(filePath),
+			Width:       w,
+			Height:      h,
+			Resolution:  fmt.Sprintf("%dx%d", w, h),
+			AspectRatio: CalculateAspectRatio(w, h),
+			Mode:        "PNG",
 		},
 		ExtractionMethod: "parameters",
 	}
@@ -188,7 +222,8 @@ func (e *PromptExtractor) ExtractParameters(filePath string, opts ...*Extraction
 			Title:    "PNG Properties",
 			Source:   "png_properties",
 		})
-	} else {
+		result.ExtractionMethod = "png_properties"
+	} else if !strict {
 		// Fallback to ComfyUI workflow/prompt if Parameters mode selected on a ComfyUI image
 		processedNodes := make(map[any]bool)
 		if workflowJSON, ok := meta["workflow"]; ok {
@@ -206,6 +241,9 @@ func (e *PromptExtractor) ExtractParameters(filePath string, opts ...*Extraction
 					result.PositivePrompts = append(result.PositivePrompts, prompts...)
 				}
 			}
+		}
+		if len(result.PositivePrompts) > 0 {
+			result.ExtractionMethod = "comfyui"
 		}
 	}
 
@@ -624,4 +662,170 @@ func (e *PromptExtractor) extractPositiveFromParametersStrict(meta map[string]st
 	}
 
 	return "", false
+}
+
+// ReadRawMetadata returns the raw metadata chunks/content for a file.
+func (e *PromptExtractor) ReadRawMetadata(filePath string) (map[string]string, error) {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".png":
+		return png.ReadTextChunks(filePath)
+	case ".json":
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"json": string(data)}, nil
+	case ".txt":
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"parameters": string(data)}, nil
+	default:
+		return nil, fmt.Errorf("unsupported file extension: %s", ext)
+	}
+}
+
+// CalculateAspectRatio computes a human-readable aspect ratio (e.g. "16:9", "1:1")
+// from width and height, matching common photographic/generation ratios within 0.05
+// tolerance or falling back to exact GCD reduction.
+func CalculateAspectRatio(w, h int) string {
+	if h == 0 || w == 0 {
+		return "0:0"
+	}
+	ratio := float64(w) / float64(h)
+
+	type commonRatio struct {
+		label string
+		val   float64
+	}
+
+	ratios := []commonRatio{
+		{"1:1", 1.0},
+		{"4:3", 4.0 / 3.0},
+		{"3:4", 3.0 / 4.0},
+		{"3:2", 3.0 / 2.0},
+		{"2:3", 2.0 / 3.0},
+		{"16:9", 16.0 / 9.0},
+		{"9:16", 9.0 / 16.0},
+		{"9:7", 9.0 / 7.0},
+		{"7:9", 7.0 / 9.0},
+	}
+
+	bestMatch := ""
+	minDiff := 10.0
+
+	for _, r := range ratios {
+		diff := math.Abs(ratio - r.val)
+		if diff < minDiff {
+			minDiff = diff
+			bestMatch = r.label
+		}
+	}
+
+	if minDiff > 0.05 {
+		g := gcd(w, h)
+		return fmt.Sprintf("%d:%d", w/g, h/g)
+	}
+
+	return bestMatch
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
+// FormatPrompts formats extracted positive prompts identically to the Komfy GUI.
+// If quiet is true, prompt headers and separators are omitted.
+func FormatPrompts(prompts []PromptInfo, quiet bool) string {
+	if len(prompts) == 0 {
+		return ""
+	}
+	if quiet {
+		var texts []string
+		for _, p := range prompts {
+			texts = append(texts, strings.TrimSpace(p.Text))
+		}
+		return strings.Join(texts, "\n\n")
+	}
+
+	var promptLines []string
+	for j, p := range prompts {
+		if len(prompts) > 1 {
+			if j > 0 {
+				promptLines = append(promptLines, "")
+			}
+			promptLines = append(promptLines, fmt.Sprintf("Prompt %d - %s:", j+1, p.Title))
+			promptLines = append(promptLines, strings.Repeat("-", 40))
+		}
+		promptLines = append(promptLines, strings.TrimSpace(p.Text))
+	}
+	return strings.Join(promptLines, "\n")
+}
+
+// FormatSummary formats the extraction summary identically to the Komfy GUI Summary tab.
+func FormatSummary(result *ExtractionResult, mode string) string {
+	var summaryLines []string
+	summaryLines = append(summaryLines, "EXTRACTION SUMMARY")
+	summaryLines = append(summaryLines, strings.Repeat("-", 20))
+	summaryLines = append(summaryLines, "")
+
+	if result == nil {
+		return strings.Join(summaryLines, "\n")
+	}
+
+	if len(result.PositivePrompts) == 0 && result.Error != "" {
+		summaryLines = append(summaryLines, fmt.Sprintf("Error in %s: %s", result.FileInfo.Filename, result.Error))
+		return strings.Join(summaryLines, "\n")
+	}
+
+	summaryLines = append(summaryLines, fmt.Sprintf("File: %s", result.FileInfo.Filename))
+	if mode != "" {
+		summaryLines = append(summaryLines, fmt.Sprintf("Mode: %s", mode))
+	}
+	if result.ExtractionMethod != "" {
+		summaryLines = append(summaryLines, fmt.Sprintf("Method: %s", result.ExtractionMethod))
+	}
+	if result.FileInfo.HasDimensions() {
+		summaryLines = append(summaryLines, fmt.Sprintf("Resolution: %dx%d", result.FileInfo.Width, result.FileInfo.Height))
+		summaryLines = append(summaryLines, fmt.Sprintf("Aspect Ratio: %s", result.FileInfo.AspectRatio))
+	}
+	summaryLines = append(summaryLines, fmt.Sprintf("Prompts found: %d", len(result.PositivePrompts)))
+
+	return strings.Join(summaryLines, "\n")
+}
+
+// WriteExtractionReport writes the formatted prompt extraction report (1:1 with Komfy GUI "Save To File").
+func WriteExtractionReport(w io.Writer, filePath string, mode string, result *ExtractionResult) error {
+	writer := bufio.NewWriter(w)
+	fmt.Fprintln(writer, strings.Repeat("=", 60))
+	fmt.Fprintln(writer, "COMFYUI POSITIVE PROMPTS EXTRACTION")
+	fmt.Fprintln(writer, strings.Repeat("=", 60))
+	fmt.Fprintf(writer, "\nExtractor mode: %s\n", mode)
+	fmt.Fprintf(writer, "File processed: %s\n", filePath)
+	if result != nil && result.FileInfo.HasDimensions() {
+		fmt.Fprintf(writer, "Resolution: %dx%d\n", result.FileInfo.Width, result.FileInfo.Height)
+		fmt.Fprintf(writer, "Aspect ratio: %s\n", result.FileInfo.AspectRatio)
+	}
+	totalPrompts := 0
+	if result != nil {
+		totalPrompts = len(result.PositivePrompts)
+	}
+	fmt.Fprintf(writer, "Total prompts: %d\n", totalPrompts)
+	fmt.Fprintf(writer, "Extraction date: %s\n", time.Now().Format("2006-01-02 15:04:05"))
+	fmt.Fprintln(writer, "\n"+strings.Repeat("=", 60))
+
+	if result != nil {
+		for j, p := range result.PositivePrompts {
+			if len(result.PositivePrompts) > 1 {
+				fmt.Fprintf(writer, "Prompt %d - %s:\n%s\n", j+1, p.Title, strings.Repeat("-", 40))
+			}
+			fmt.Fprintln(writer, p.Text)
+		}
+	}
+	return writer.Flush()
 }
